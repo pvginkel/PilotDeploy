@@ -1,13 +1,25 @@
-# Curated entry points for PilotDeploy. Helm and Terraform live in the `iac` toolchain sidecar.
-#
-# A seed: the repo holds no chart yet. Its test proves only that the toolchains its real gates
-# use are there. Slice 001's phase that builds the chart replaces this file with the real
-# manifest.
+# Curated entry points for PilotDeploy. Helm, Terraform and the tests live in the `iac` toolchain
+# sidecar, the chart dependency resolver in `aac-tools`, so the verbs carry their `cexec` prefix
+# here and only here.
 projects:
   root:
     description: >-
-      Pilot's deploy repo: its Helm chart, the per-stage configuration Argo CD syncs Pilot from,
-      and the Terraform the PreSync hook applies.
+      Pilot's deploy repo: the `pilot` Helm chart on the homelab-shared library dependency, the
+      prd configuration Argo CD syncs it from and the Terraform its PreSync hook applies. There
+      is no deploy pipeline: Argo deploys it, once ArgoCDDeploy's registry carries it.
+    # helm lint reads the built dependency, so the deps step comes first. The hook.* values stand
+    # in for the four helm parameters the Application passes; the library `required`-guards each.
+    lint:
+      - cexec aac-tools chart-deps
+      - >-
+        cexec iac helm lint chart --namespace pilot-prd --values config/prd/values.yaml
+        --set hook.repo=https://github.com/pvginkel/PilotDeploy.git,hook.revision=0123456789abcdef0123456789abcdef01234567,hook.stage=prd,hook.namespace=pilot-prd
+      - cexec iac terraform fmt -check -diff -recursive
+    # tests/render-chart.py renders prd as the Application pilot-prd does and asserts on the
+    # objects; tf-check checks terraform/ and tests/terraform-test.py plans prd's tfvars against
+    # mocked providers.
     test:
-      - cexec iac helm version --short
-      - cexec iac terraform version
+      - cexec aac-tools chart-deps
+      - cexec iac tests/render-chart.py
+      - cexec iac tf-check
+      - cexec iac tests/terraform-test.py

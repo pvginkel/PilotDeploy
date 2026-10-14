@@ -1,0 +1,11 @@
+# The prd stage's values for the pilot chart, as Argo CD's Application pilot-prd renders it.
+
+images:
+  # The backend's and the UI's builds, registry:5000/pilot and registry:5000/pilot-ui. Every green
+  # PilotApp build pins both here (cicd.writeVersionPins, ":<build number>"), editing these
+  # block-style lines in place; the pin step never creates a key.
+  pilot: ':0'
+  pilotUI: ':0'
+  # registry:5000/ssegateway, pinned by hand to the build the estate's other gateways run.
+  # SSEGateway's build writes no pin here.
+  sseGateway: ':64'

@@ -1,0 +1,12 @@
+{{/*
+The stage namespace is a tracked chart manifest (argo-cd D25), applied at wave -1 so it exists
+before the PreSync hook runs. `Prune=false` blocks only the sync-time prune path (D26); the
+Application-delete cascade still removes it.
+*/}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false

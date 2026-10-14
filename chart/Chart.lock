@@ -1,0 +1,6 @@
+dependencies:
+- name: homelab-shared
+  repository: https://charts.home
+  version: 0.6.0
+digest: sha256:547c89b4ae8cbf264b113f01c3519265f9038ba310b88074674196abf090b1cc
+generated: "2026-10-14T23:52:44.321938922+02:00"

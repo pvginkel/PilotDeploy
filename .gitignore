@@ -1,0 +1,6 @@
+# The pinned library chart is resolved by `helm dependency build` from chart/Chart.lock, here
+# and on Argo's repo-server alike; the tarball is never committed.
+/chart/charts/
+# tf-check's `terraform init`; the hook initialises its own clone.
+/terraform/.terraform/
+/terraform/.terraform.lock.hcl
