@@ -1,0 +1,13 @@
+# Curated entry points for PilotDeploy. Helm and Terraform live in the `iac` toolchain sidecar.
+#
+# A seed: the repo holds no chart yet. Its test proves only that the toolchains its real gates
+# use are there. Slice 001's phase that builds the chart replaces this file with the real
+# manifest.
+projects:
+  root:
+    description: >-
+      Pilot's deploy repo: its Helm chart, the per-stage configuration Argo CD syncs Pilot from,
+      and the Terraform the PreSync hook applies.
+    test:
+      - cexec iac helm version --short
+      - cexec iac terraform version
