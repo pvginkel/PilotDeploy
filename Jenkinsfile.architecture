@@ -1,0 +1,62 @@
+// Generates the architecture of pilot's prd stage as producer pilot-deploy, validates it against
+// the architecture service, and archives it as the producer's artifact, which AaC/Architecture
+// collects.
+//
+// The artifact is generated, never committed. gen-architecture renders chart/ the way Argo CD
+// renders it, reads the judgment layer (architecture.yaml at the repo root) and writes
+// docs/architecture/pilot-deploy.yaml. One pipeline publishes one stage, from the branch Argo CD
+// syncs it from: main.
+//
+// Controller config:
+//   - Job: AaC/PilotDeploy
+//   - SCM: pvginkel/PilotDeploy, branch main
+//   - Script Path: Jenkinsfile.architecture
+
+library identifier: 'JenkinsPipelineUtils', changelog: false
+
+pipeline {
+    agent {
+        kubernetes {
+            inheritFrom 'jenkins-agent'
+            yaml podYaml(templates: ['aac-tools'])
+        }
+    }
+
+    options {
+        disableConcurrentBuilds(abortPrevious: true)
+        skipDefaultCheckout()
+        timeout(time: 60, unit: 'MINUTES')
+        timestamps()
+    }
+
+    triggers {
+        githubPush()
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Generate architecture') {
+            steps {
+                script {
+                    architectureProducer.generate(stage: 'prd', producer: 'pilot-deploy')
+                    architectureProducer.archive(files: ['docs/architecture/*.yaml'])
+                }
+            }
+        }
+
+        // AaC/Architecture copies a producer's last successful build, so a model that fails here
+        // never reaches it, archived or not.
+        stage('Validate architecture') {
+            steps {
+                script {
+                    architectureProducer.validate(files: ['docs/architecture/*.yaml'])
+                }
+            }
+        }
+    }
+}

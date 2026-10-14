@@ -4,3 +4,5 @@
 # tf-check's `terraform init`; the hook initialises its own clone.
 /terraform/.terraform/
 /terraform/.terraform.lock.hcl
+# The architecture artifact is a build output (Jenkinsfile.architecture).
+/docs/architecture/

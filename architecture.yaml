@@ -1,0 +1,26 @@
+# The judgment layer the aac-tools generator reads to publish this repo's prd stage as producer
+# `pilot-deploy` (Jenkinsfile.architecture). Everything else in the artifact is derived from the
+# render; the schema is what `gen-architecture --help` prints from the aac-tools toolchain.
+
+# The first commit carrying the chart. This repo was created for Pilot, so its history dates the
+# app.
+introduced: '2026-10-14'
+
+# Pilot's products, services and edges are the `pilot-app` producer's (pvginkel/PilotApp), so the
+# layer references its app:* products and the generator resolves them to that producer's UUIDs. The
+# backend's image runs both the `migrate` init container and the `backend` container; the UI is the
+# app's second image, the SSE gateway the homelab's shared one.
+images:
+  pilot: app:pilot
+  pilot-ui: app:pilot-ui
+  ssegateway: app:ssegateway
+
+# The Service's port `http` is the UI's nginx, the pod's front. Without this entry, a run that cannot
+# resolve app:pilot-ui (its producer unpublished) gives the host to the one in-house service the pod
+# still resolves, the SSE gateway's.
+exposures:
+  pilot: ui
+
+# The operator's UI, the one host the Service carries.
+webUi:
+  - pilot.ginbov.nl

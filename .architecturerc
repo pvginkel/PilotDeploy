@@ -1,0 +1,11 @@
+generated: true
+sources:
+  - architecture.yaml
+  - chart/
+  - config/prd/
+instructions: >
+  Generated producer (id pilot-deploy). The artifact docs/architecture/pilot-deploy.yaml is a
+  build output: gitignored, produced by gen-architecture from the aac-tools image, which renders
+  chart/ with config/prd/values.yaml the way Argo CD renders it. The AaC/PilotDeploy Jenkins job
+  runs it. Edit only the judgment layer, architecture.yaml at the repo root, whose schema is what
+  gen-architecture --help prints from the aac-tools toolchain.
