@@ -10,7 +10,8 @@ the repo-server builds it.
 Beyond the frame (the library, the pins, the namespace, the hook), it fails on what the render
 shows would keep the pod from starting or put a secret in the commit: an env var reading a Secret
 key nothing in the namespace provides, a `$(VAR)` the kubelet cannot resolve, a literal where a
-secret belongs, and the public site's annotations missing or wrong.
+secret belongs, the public site's annotations missing or wrong, and the containers' in-pod wiring
+(the gateway's port, its callback URL, the backend's drain) off the ports and paths the images use.
 
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
@@ -79,6 +80,18 @@ BACKEND_PORT = 3501
 UI_PORT = 3500
 BACKEND_PROBES = {"readinessProbe": "/health/readyz", "livenessProbe": "/health/healthz"}
 MIGRATE_ARGS = ["python", "-m", "app.cli", "upgrade-db"]
+# The pod's in-pod wiring, over loopback: the gateway listens on the port the UI's nginx proxies
+# /api/sse/ to (frontend/nginx.conf) and the backend's SSE_GATEWAY_URL names
+# (backend/app/config.py); it calls back the backend's /api/sse/callback (backend/app/api/sse.py);
+# the backend's preStop drains through /health/drain (backend/app/api/health.py) with a bearer from
+# its own env.
+GATEWAY_PORT = 3502
+CALLBACK_PATH = "/api/sse/callback"
+DRAIN_PATH = "/health/drain"
+LOOPBACK = ("localhost", "127.0.0.1")
+# A URL in the preStop's Python, and an env var it reads.
+SCRIPT_URL = re.compile(r"http://[^\s\"']+")
+SCRIPT_ENV = re.compile(r"os\.environ\[[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']\]")
 # The public site: the front door's annotations on the Service in front of the UI (DockerImages
 # nginx-configurator). No enable-ssl: a public site is served over HTTPS regardless.
 PUBLIC_HOST = "pilot.ginbov.nl"
@@ -478,6 +491,57 @@ def check_pod(docs):
     return deployment
 
 
+def loopback(url, port, path):
+    """Whether `url` reaches `path` on `port` of the pod's own loopback."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        return (
+            parts.scheme == "http"
+            and parts.hostname in LOOPBACK
+            and parts.port == port
+            and parts.path == path
+        )
+    except ValueError:
+        return False
+
+
+def check_wiring(deployment):
+    """The containers reach each other over loopback on the ports and paths the images use."""
+    gateway = named(deployment, "sse-gateway")
+    env = env_of(gateway)
+    port = env.get("PORT", (None, {}))[1].get("value")
+    declared = [p["containerPort"] for p in gateway.get("ports") or []]
+    check(
+        port == str(GATEWAY_PORT) and declared == [GATEWAY_PORT],
+        f"the gateway listens on PORT {port!r} and declares {declared}, not {GATEWAY_PORT}, where "
+        "the UI's nginx and the backend reach it",
+    )
+    callback = env.get("CALLBACK_URL", (None, {}))[1].get("value") or ""
+    check(
+        loopback(callback, BACKEND_PORT, CALLBACK_PATH),
+        f"the gateway's CALLBACK_URL is {callback!r}, not the backend's {CALLBACK_PATH} on "
+        f"localhost:{BACKEND_PORT}",
+    )
+
+    backend = named(deployment, "backend")
+    command = " ".join(
+        ((backend.get("lifecycle") or {}).get("preStop") or {}).get("exec", {}).get("command")
+        or []
+    )
+    urls = SCRIPT_URL.findall(command)
+    check(
+        len(urls) == 1 and loopback(urls[0], BACKEND_PORT, DRAIN_PATH),
+        f"the backend's preStop calls {urls}, not its {DRAIN_PATH} on localhost:{BACKEND_PORT}",
+    )
+    reads = SCRIPT_ENV.findall(command)
+    defined = env_of(backend)
+    check(
+        reads and all(name in defined for name in reads),
+        f"the backend's preStop reads env {reads}, of which the backend defines "
+        f"{[name for name in reads if name in defined]}",
+    )
+
+
 def check_images():
     """Each container runs its own pin's image. The two app pins hold one build number, so the
     stage's render cannot tell them apart; this one sets each pin to a tag of its own."""
@@ -697,6 +761,7 @@ def main():
         check_secret_refs(docs, deployment)
         check_external_secrets(docs, deployment)
         check_public_service(docs, deployment)
+        check_wiring(deployment)
     check_render_stable(first)
 
     if failures:
