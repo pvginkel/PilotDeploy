@@ -1,5 +1,34 @@
 # The prd stage's values for the pilot chart, as Argo CD's Application pilot-prd renders it.
 
+# The public site, and the backend's BASEURL under it: Keycloak's client pilot-app registers
+# https://pilot.ginbov.nl/api/auth/callback as its redirect URI.
+publicHost: pilot.ginbov.nl
+
+# The existing public Keycloak's realm.
+oidc:
+  issuerUrl: https://auth.ginbov.nl/realms/homelab
+
+# The shared postgres-pas substrate's pooler, where terraform/'s database lives.
+db:
+  host: postgres-pooler-rw.postgres-pas-prd.svc.cluster.local
+
+# ESO wiring (homelab-shared.externalsecrets): the OIDC client's id and secret, from the leaf the
+# operator writes. The app's other secrets are generated in the cluster
+# (chart/templates/generated-secrets.yaml).
+externalSecrets:
+  storeRef:
+    name: openbao-prd
+  secrets:
+    oidc:
+      targetName: pilot-oidc
+      data:
+        - secretKey: client_id
+          path: eso/prd/pilot/prd/oidc
+          property: client_id
+        - secretKey: client_secret
+          path: eso/prd/pilot/prd/oidc
+          property: client_secret
+
 images:
   # The backend's and the UI's builds, registry:5000/pilot and registry:5000/pilot-ui. Every green
   # PilotApp build pins both here (cicd.writeVersionPins, ":<build number>"), editing these

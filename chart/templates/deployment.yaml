@@ -1,0 +1,205 @@
+{{- /*
+Pilot: the Flask backend, the UI's nginx and the SSE gateway in one pod, reaching each other over
+loopback. The UI's nginx is the pod's front: it serves the SPA and proxies /api/sse/ to the gateway
+and /api/ to the backend (PilotApp frontend/nginx.conf).
+*/}}
+{{- /* Seconds every container of a terminating pod goes on serving: the Service drops the pod from
+its endpoints asynchronously, and traffic reaches it until it has. */}}
+{{- $endpointsLeave := 15 }}
+{{- /* The Secret terraform/main.tf's module "db" writes into this namespace. */}}
+{{- $database := "pilot-db" }}
+{{- $dbHost := required "db.host is not set" .Values.db.host }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pilot
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pilot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pilot
+    spec:
+      # Service link variables are noise to every container here.
+      enableServiceLinks: false
+      # Above everything the backend's preStop may take: the wait for the endpoints, then the
+      # drain's 60 s.
+      terminationGracePeriodSeconds: {{ add $endpointsLeave 60 15 }}
+      initContainers:
+        # The migrations, applied to completion before the backend serves. A failed run exits
+        # non-zero and the kubelet retries it. The image sets FLASK_ENV=production, under which
+        # the app refuses to start on the default SECRET_KEY.
+        - name: migrate
+          image: registry:5000/pilot{{ required "images.pilot is not set: the PilotApp build pins it" .Values.images.pilot }}
+          args: ["python", "-m", "app.cli", "upgrade-db"]
+          env:
+            - name: DB_HOST
+              value: {{ $dbHost | quote }}
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $database }}
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $database }}
+                  key: password
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $database }}
+                  key: database
+            - name: DATABASE_URL
+              value: postgresql+psycopg://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST)/$(DB_NAME)?sslmode=prefer
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pilot-secret-key
+                  key: password
+      containers:
+        - name: backend
+          image: registry:5000/pilot{{ .Values.images.pilot }}
+          ports:
+            - name: api
+              containerPort: 3501
+          env:
+            - name: DB_HOST
+              value: {{ $dbHost | quote }}
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $database }}
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $database }}
+                  key: password
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $database }}
+                  key: database
+            - name: DATABASE_URL
+              value: postgresql+psycopg://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST)/$(DB_NAME)?sslmode=prefer
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pilot-secret-key
+                  key: password
+            - name: DRAIN_AUTH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pilot-drain-auth
+                  key: password
+            - name: SSE_CALLBACK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pilot-sse-callback
+                  key: password
+            # The sign-in. The redirect URI and the cookie's Secure flag derive from BASEURL; the
+            # token audience, and so the client whose roles the editor gate reads, is the client id.
+            - name: BASEURL
+              value: https://{{ required "publicHost is not set" .Values.publicHost }}
+            - name: OIDC_ENABLED
+              value: "true"
+            - name: OIDC_ISSUER_URL
+              value: {{ required "oidc.issuerUrl is not set" .Values.oidc.issuerUrl | quote }}
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecrets.secrets.oidc.targetName }}
+                  key: client_id
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecrets.secrets.oidc.targetName }}
+                  key: client_secret
+          # An httpGet preStop cannot read the drain bearer from a Secret, so the image's own
+          # Python calls /health/drain once the endpoints have dropped the pod. It returns once the
+          # lifecycle coordinator has shut down, and the process then exits.
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - python
+                  - -c
+                  - >-
+                    import os, time, urllib.request as r;
+                    time.sleep({{ $endpointsLeave }});
+                    r.urlopen(r.Request("http://localhost:3501/health/drain",
+                    headers={"Authorization": "Bearer " + os.environ["DRAIN_AUTH_KEY"]}), timeout=60)
+          # At the app root, not under /api: the UI's nginx proxies neither.
+          readinessProbe:
+            httpGet:
+              path: /health/readyz
+              port: api
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health/healthz
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 10
+        - name: ui
+          image: registry:5000/pilot-ui{{ required "images.pilotUI is not set: the PilotApp build pins it" .Values.images.pilotUI }}
+          ports:
+            - name: http
+              containerPort: 3500
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $endpointsLeave }}
+          # The image's nginx answers /health itself.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+        - name: sse-gateway
+          image: registry:5000/ssegateway{{ required "images.sseGateway is not set" .Values.images.sseGateway }}
+          ports:
+            - name: sse
+              containerPort: 3502
+          env:
+            - name: SSE_CALLBACK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pilot-sse-callback
+                  key: password
+            - name: CALLBACK_URL
+              value: http://localhost:3501/api/sse/callback?secret=$(SSE_CALLBACK_SECRET)
+            - name: PORT
+              value: "3502"
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $endpointsLeave }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: sse
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: sse
+            initialDelaySeconds: 10
+            periodSeconds: 10

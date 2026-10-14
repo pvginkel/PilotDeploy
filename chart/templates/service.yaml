@@ -1,0 +1,25 @@
+{{- /*
+The public site: the front door serves https://<publicHost> with a Let's Encrypt certificate and
+proxies it to port 80, the UI's nginx. A public site is served over HTTPS whatever enable-ssl says,
+so it carries none. Prometheus scrapes the backend's /metrics, which nginx does not proxy, on the
+pod's port 3501.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: pilot
+  annotations:
+    nginx.webathome.org/server-name: {{ required "publicHost is not set" .Values.publicHost }}
+    nginx.webathome.org/is-public: "true"
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics
+    prometheus.io/port: "3501"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pilot
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http

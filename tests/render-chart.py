@@ -7,15 +7,22 @@ into that namespace, with `../config/prd/values.yaml` and the four `hook.*` helm
 `releases.hookParameters` as `--set`. The library dependency is built from chart/Chart.lock, as
 the repo-server builds it.
 
+Beyond the frame (the library, the pins, the namespace, the hook), it fails on what the render
+shows would keep the pod from starting or put a secret in the commit: an env var reading a Secret
+key nothing in the namespace provides, a `$(VAR)` the kubelet cannot resolve, a literal where a
+secret belongs, and the public site's annotations missing or wrong.
+
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
 
+import ast
 import pathlib
 import re
 import subprocess
 import sys
 import tarfile
 import time
+import urllib.parse
 
 import yaml
 
@@ -49,9 +56,65 @@ CLUSTER_SCOPED = {("", "Namespace")}
 # set fails the gate until it is classified.
 NAMESPACED = {
     ("", "ConfigMap"),
+    ("", "Service"),
+    ("apps", "Deployment"),
     ("batch", "Job"),
+    ("external-secrets.io", "ExternalSecret"),
+    ("generators.external-secrets.io", "Password"),
     ("rbac.authorization.k8s.io", "RoleBinding"),
 }
+# The pod: its Deployment, and the image each container runs, from which pin.
+DEPLOYMENT = "pilot"
+CONTAINER_IMAGES = {
+    "migrate": ("registry:5000/pilot", "pilot"),
+    "backend": ("registry:5000/pilot", "pilot"),
+    "ui": ("registry:5000/pilot-ui", "pilotUI"),
+    "sse-gateway": ("registry:5000/ssegateway", "sseGateway"),
+}
+# PilotApp's contracts: the backend's port (backend/app/consts.py DEFAULT_BACKEND_PORT) and its
+# health routes at the app root (backend/app/__init__.py), the UI's nginx port
+# (frontend/nginx.conf), and the migration command (backend/app/cli.py, run as a module: the image
+# installs no project scripts).
+BACKEND_PORT = 3501
+UI_PORT = 3500
+BACKEND_PROBES = {"readinessProbe": "/health/readyz", "livenessProbe": "/health/healthz"}
+MIGRATE_ARGS = ["python", "-m", "app.cli", "upgrade-db"]
+# The public site: the front door's annotations on the Service in front of the UI (DockerImages
+# nginx-configurator). No enable-ssl: a public site is served over HTTPS regardless.
+PUBLIC_HOST = "pilot.ginbov.nl"
+PUBLIC_ANNOTATIONS = {
+    "nginx.webathome.org/server-name": PUBLIC_HOST,
+    "nginx.webathome.org/is-public": "true",
+}
+FRONT_DOOR = ("nginx.webathome.org/", "dns.webathome.org/")
+# The sign-in. No OIDC_AUDIENCE: the audience defaults to the client id, under whose
+# resource_access the backend's editor gate reads the role.
+BACKEND_ENV = {
+    "BASEURL": f"https://{PUBLIC_HOST}",
+    "OIDC_ENABLED": "true",
+    "OIDC_ISSUER_URL": "https://auth.ginbov.nl/realms/homelab",
+}
+ABSENT_ENV = ("OIDC_AUDIENCE",)
+# The OIDC client's leaf, which the operator writes, and the store ESO reads it through.
+STORE = {"name": "openbao-prd", "kind": "ClusterSecretStore"}
+OIDC_LEAF = f"eso/{STAGE}/pilot/{STAGE}/oidc"
+OIDC_ENV = {"OIDC_CLIENT_ID": "client_id", "OIDC_CLIENT_SECRET": "client_secret"}
+# The secrets ESO generates in the cluster, once each; a Password generator yields key `password`.
+GENERATED = {"pilot-secret-key", "pilot-drain-auth", "pilot-sse-callback"}
+GENERATOR_KEY = "password"
+# An env var or query parameter named like this carries a secret, so never a literal.
+SECRET_NAME = re.compile(r"secret|password|token|(^|_)key$", re.IGNORECASE)
+# A Kubernetes dependent-env reference; `$$(` escapes a literal `$(`.
+ENV_REF = re.compile(r"(?<!\$)\$\(([A-Za-z_][A-Za-z0-9_]*)\)")
+# Env vars two containers must define alike, references resolved: the migrations run against the
+# database the backend serves from, under its secret key, and the gateway's callbacks carry the
+# secret the backend checks.
+SHARED_ENV = {
+    ("migrate", "backend"): ("DATABASE_URL", "SECRET_KEY"),
+    ("sse-gateway", "backend"): ("SSE_CALLBACK_SECRET",),
+}
+# A bearer token written into the chart (ElectronicsInventoryDeploy's preStop header).
+LITERAL_BEARER = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{8,}")
 
 failures = []
 
@@ -286,6 +349,329 @@ def check_scope(docs):
         )
 
 
+def terraform_secrets():
+    """{name: keys} of the Secret Terraform writes into the namespace: the SECRET and SECRET_KEYS
+    tests/terraform-test.py asserts the plan writes."""
+    constants = {}
+    for node in ast.parse((REPO / "tests" / "terraform-test.py").read_text()).body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            try:
+                constants[node.targets[0].id] = ast.literal_eval(node.value)
+            except ValueError:
+                continue
+    return {constants["SECRET"]: set(constants["SECRET_KEYS"])}
+
+
+def secret_providers(docs):
+    """{Secret name: its keys} of every Secret the namespace gets: Terraform's, and each rendered
+    ExternalSecret's target. None where a render cannot know the keys: a whole extracted leaf, or
+    a generator the chart does not render."""
+    passwords = {doc["metadata"]["name"] for doc in docs if doc["kind"] == "Password"}
+    providers = terraform_secrets()
+    for doc in docs:
+        if doc["kind"] != "ExternalSecret":
+            continue
+        spec = doc["spec"]
+        target = spec.get("target") or {}
+        keys = {item["secretKey"] for item in spec.get("data") or []}
+        for source in spec.get("dataFrom") or []:
+            generator = (source.get("sourceRef") or {}).get("generatorRef") or {}
+            if generator.get("kind") == "Password" and generator.get("name") in passwords:
+                keys.add(GENERATOR_KEY)
+            else:
+                keys = None
+                break
+        template = (target.get("template") or {}).get("data")
+        if keys is not None and template is not None:
+            keys = set(template)
+        providers[target.get("name") or doc["metadata"]["name"]] = keys
+    return providers
+
+
+def pod_containers(deployment):
+    spec = deployment["spec"]["template"]["spec"]
+    return [*(spec.get("initContainers") or []), *spec["containers"]]
+
+
+def named(deployment, name):
+    return next((c for c in pod_containers(deployment) if c["name"] == name), {})
+
+
+def env_of(container):
+    return {entry["name"]: (i, entry) for i, entry in enumerate(container.get("env") or [])}
+
+
+def secret_ref(entry):
+    return (entry.get("valueFrom") or {}).get("secretKeyRef")
+
+
+def definition(env, name, before=None):
+    """`name`'s definition in `env`, each $(VAR) it reads replaced by VAR's own definition as the
+    kubelet resolves it: against the variables defined before it. None where it is undefined."""
+    position, entry = env.get(name, (None, None))
+    if entry is None or (before is not None and position >= before):
+        return None
+    if "value" not in entry:
+        return entry.get("valueFrom")
+    refs = ENV_REF.findall(entry["value"])
+    return [entry["value"], {ref: definition(env, ref, position) for ref in refs}]
+
+
+def container_port(container, port):
+    """The containerPort a probe's or a Service's port names in `container`, or None."""
+    for declared in container.get("ports") or []:
+        if port in (declared.get("name"), declared["containerPort"]):
+            return declared["containerPort"]
+    return None
+
+
+def check_pod(docs):
+    deployments = [doc for doc in docs if doc["kind"] == "Deployment"]
+    check(
+        [label(doc) for doc in deployments] == [f"Deployment/{DEPLOYMENT}"],
+        f"renders {[label(doc) for doc in deployments]}, not the one Deployment/{DEPLOYMENT}",
+    )
+    deployment = find(docs, "Deployment", DEPLOYMENT)
+    if deployment is None:
+        return None
+    spec = deployment["spec"]["template"]["spec"]
+    names = {
+        "initContainers": [c["name"] for c in spec.get("initContainers") or []],
+        "containers": [c["name"] for c in spec["containers"]],
+    }
+    check(
+        names == {"initContainers": ["migrate"], "containers": ["backend", "ui", "sse-gateway"]},
+        f"the pod runs {names}, not the migrations before the backend, the UI and the gateway",
+    )
+    for name in CONTAINER_IMAGES:
+        container = named(deployment, name)
+        for probe in ("readinessProbe", "livenessProbe", "startupProbe"):
+            port = ((container.get(probe) or {}).get("httpGet") or {}).get("port")
+            check(
+                port is None or container_port(container, port) is not None,
+                f"container {name}'s {probe} reads port {port!r}, which it does not declare",
+            )
+
+    migrate = named(deployment, "migrate")
+    check(
+        "command" not in migrate and migrate.get("args") == MIGRATE_ARGS,
+        f"the migrate init container runs command {migrate.get('command')} args "
+        f"{migrate.get('args')}, not {MIGRATE_ARGS} under the image's entrypoint",
+    )
+    backend = named(deployment, "backend")
+    for probe, path in BACKEND_PROBES.items():
+        get = (backend.get(probe) or {}).get("httpGet") or {}
+        check(
+            get.get("path") == path and container_port(backend, get.get("port")) == BACKEND_PORT,
+            f"the backend's {probe} reads {get.get('path')} on {get.get('port')}, not {path} on "
+            f"{BACKEND_PORT}",
+        )
+    env = env_of(backend)
+    for name, value in BACKEND_ENV.items():
+        entry = env.get(name, (None, {}))[1]
+        check(
+            entry.get("value") == value,
+            f"the backend's {name} is {entry.get('value')!r}, not {value!r}",
+        )
+    for name in ABSENT_ENV:
+        check(name not in env, f"the backend sets {name}")
+    return deployment
+
+
+def check_images():
+    """Each container runs its own pin's image. The two app pins hold one build number, so the
+    stage's render cannot tell them apart; this one sets each pin to a tag of its own."""
+    names = sorted({pin for _, pin in CONTAINER_IMAGES.values()})
+    pins = {pin: f":{9001 + i}" for i, pin in enumerate(names)}
+    result = template({**hook_parameters(), **{f"images.{pin}": tag for pin, tag in pins.items()}})
+    if result.returncode != 0:
+        sys.exit(f"helm template with distinct pins failed:\n{result.stderr}")
+    deployment = find(objects(result.stdout), "Deployment", DEPLOYMENT) or {}
+    for name, (repository, pin) in CONTAINER_IMAGES.items():
+        image = named(deployment, name).get("image") if deployment else None
+        check(
+            image == f"{repository}{pins[pin]}",
+            f"container {name} runs {image}, not images.{pin}'s {repository}{pins[pin]}",
+        )
+
+
+def check_env(deployment):
+    """Every container's env resolves as the kubelet resolves it, and no secret is a literal."""
+    for container in pod_containers(deployment):
+        name = container["name"]
+        env = env_of(container)
+        from_secrets = {var for var, (_, entry) in env.items() if secret_ref(entry)}
+        for var, (position, entry) in env.items():
+            if SECRET_NAME.search(var):
+                check(
+                    secret_ref(entry) is not None,
+                    f"container {name}'s {var} is not read from a Secret: a literal where a "
+                    "secret belongs",
+                )
+            if "value" not in entry:
+                continue
+            value = entry["value"]
+            for ref in ENV_REF.findall(value):
+                check(
+                    definition(env, ref, position) is not None,
+                    f"container {name}'s {var} reads $({ref}), which no variable before it "
+                    "defines, so the kubelet leaves it verbatim",
+                )
+            url = urllib.parse.urlsplit(value)
+            credentials = [("the URL's password", url.password)] if url.password else []
+            credentials += [
+                (f"query parameter {key}", item)
+                for key, item in urllib.parse.parse_qsl(url.query)
+                if SECRET_NAME.search(key)
+            ]
+            for where, item in credentials:
+                ref = ENV_REF.fullmatch(item)
+                check(
+                    ref is not None and ref.group(1) in from_secrets,
+                    f"container {name}'s {var} carries {where} as {item!r}, not as $(VAR) of a "
+                    "variable read from a Secret",
+                )
+
+
+def check_shared_env(deployment):
+    for (first, second), names in SHARED_ENV.items():
+        for name in names:
+            mine = definition(env_of(named(deployment, first)), name)
+            theirs = definition(env_of(named(deployment, second)), name)
+            check(
+                mine is not None and mine == theirs,
+                f"containers {first} and {second} define {name} differently: {mine} and {theirs}",
+            )
+
+
+def check_secret_refs(docs, deployment):
+    providers = secret_providers(docs)
+    for secret, keys in providers.items():
+        check(
+            keys is not None,
+            f"the Secret {secret} carries keys a render cannot know: a whole leaf, or a generator "
+            "the chart does not render",
+        )
+    for container in pod_containers(deployment):
+        for entry in container.get("env") or []:
+            ref = secret_ref(entry)
+            if ref is None:
+                continue
+            check(
+                ref["key"] in (providers.get(ref["name"]) or ()),
+                f"container {container['name']}'s {entry['name']} reads key {ref['key']} of the "
+                f"Secret {ref['name']}, which nothing in {NAMESPACE} provides; the pod cannot "
+                "start",
+            )
+        for source in container.get("envFrom") or []:
+            secret = (source.get("secretRef") or {}).get("name")
+            check(
+                secret is None or secret in providers,
+                f"container {container['name']} takes its env from the Secret {secret}, which "
+                f"nothing in {NAMESPACE} provides",
+            )
+
+
+def check_external_secrets(docs, deployment):
+    secrets = [doc for doc in docs if doc["kind"] == "ExternalSecret"]
+    for doc in secrets:
+        if "secretStoreRef" in doc["spec"]:
+            check(
+                doc["spec"]["secretStoreRef"] == STORE,
+                f"{label(doc)} reads through {doc['spec']['secretStoreRef']}, not {STORE}",
+            )
+
+    env = env_of(named(deployment, "backend"))
+    for var, prop in OIDC_ENV.items():
+        ref = secret_ref(env.get(var, (None, {}))[1]) or {}
+        filled = [
+            doc for doc in secrets
+            if (doc["spec"].get("target") or {}).get("name") == ref.get("name")
+            and "secretStoreRef" in doc["spec"]
+        ]
+        sources = [
+            item["remoteRef"] for doc in filled for item in doc["spec"].get("data") or []
+            if item["secretKey"] == ref.get("key")
+        ]
+        check(
+            sources == [{"key": OIDC_LEAF, "property": prop}],
+            f"the backend's {var} reads {ref}, which no ExternalSecret fills from {OIDC_LEAF} "
+            f"property {prop}: {sources}",
+        )
+
+    for name in sorted(GENERATED):
+        generator = find(docs, "Password", name)
+        secret = find(docs, "ExternalSecret", name)
+        check(
+            generator is not None and secret is not None,
+            f"no Password generator and ExternalSecret {name}, the in-cluster generated secret",
+        )
+        if generator is None or secret is None:
+            continue
+        spec = secret["spec"]
+        check(
+            spec.get("refreshInterval") == "0"
+            and (spec.get("target") or {}).get("name") == name
+            and spec.get("dataFrom") == [{"sourceRef": {"generatorRef": {
+                "apiVersion": generator["apiVersion"], "kind": "Password", "name": name,
+            }}}],
+            f"ExternalSecret/{name} does not generate its Secret once from Password/{name}",
+        )
+        for doc in (generator, secret):
+            check(
+                (doc["metadata"].get("annotations") or {}).get("argocd.argoproj.io/sync-wave")
+                == "-1",
+                f"{label(doc)} is not at wave -1, ahead of the Deployment that reads it",
+            )
+
+
+def check_no_literal_secrets(docs, text):
+    check(
+        not [doc for doc in docs if doc["kind"] == "Secret"],
+        "renders a Secret: its value would be in the commit; ESO or Terraform makes every Secret",
+    )
+    bearer = LITERAL_BEARER.search(text)
+    check(
+        bearer is None,
+        f"the render carries a literal bearer token: {bearer and bearer.group(0)}",
+    )
+
+
+def check_public_service(docs, deployment):
+    fronted = [
+        doc for doc in docs if doc["kind"] == "Service"
+        and any(key.startswith(FRONT_DOOR) for key in doc["metadata"].get("annotations") or {})
+    ]
+    check(
+        [label(doc) for doc in fronted] == ["Service/pilot"],
+        f"the front door's annotations are on {[label(doc) for doc in fronted]}, not on the one "
+        "Service/pilot",
+    )
+    service = find(docs, "Service", "pilot")
+    if service is None:
+        return
+    annotations = {
+        key: value for key, value in (service["metadata"].get("annotations") or {}).items()
+        if key.startswith(FRONT_DOOR)
+    }
+    check(
+        annotations == PUBLIC_ANNOTATIONS,
+        f"Service/pilot's front-door annotations are {annotations}, not {PUBLIC_ANNOTATIONS}",
+    )
+    labels = deployment["spec"]["template"]["metadata"].get("labels") or {}
+    selector = service["spec"].get("selector") or {}
+    check(
+        selector and selector.items() <= labels.items(),
+        f"Service/pilot selects {selector}, which the pod's labels {labels} do not match",
+    )
+    ui = named(deployment, "ui")
+    targets = [port.get("targetPort") for port in service["spec"]["ports"]]
+    check(
+        targets and all(container_port(ui, target) == UI_PORT for target in targets),
+        f"Service/pilot targets {targets}, not the UI's nginx on {UI_PORT}",
+    )
+
+
 def check_render_stable(first):
     # `now` renders to the second, so a render more than a second later differs if any value
     # reads the clock; one reading randomness differs on any second render.
@@ -302,6 +688,15 @@ def main():
     check_namespace_manifest(docs)
     check_hook(docs)
     check_scope(docs)
+    check_no_literal_secrets(docs, first)
+    deployment = check_pod(docs)
+    check_images()
+    if deployment is not None:
+        check_env(deployment)
+        check_shared_env(deployment)
+        check_secret_refs(docs, deployment)
+        check_external_secrets(docs, deployment)
+        check_public_service(docs, deployment)
     check_render_stable(first)
 
     if failures:
