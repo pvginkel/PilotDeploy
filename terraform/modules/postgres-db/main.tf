@@ -43,6 +43,12 @@ variable "secret_name" {
   type        = string
 }
 
+variable "password_rotation" {
+  description = "Opaque rotation trigger. Any change re-mints the password on the same role, a set value dropped to null included; null while never set leaves it as it is."
+  type        = string
+  default     = null
+}
+
 locals {
   identifier = "${replace(var.namespace, "-", "_")}_${var.name}"
 }
@@ -50,6 +56,10 @@ locals {
 resource "random_password" "this" {
   length  = 32
   special = false # URL-safe
+
+  # Null, never a map holding null, while no keeper is set: states from before the trigger hold
+  # null keepers, which a map holding null changes in place.
+  keepers = var.password_rotation == null ? null : { rotation = var.password_rotation }
 }
 
 resource "postgresql_role" "this" {
