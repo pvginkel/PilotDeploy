@@ -100,9 +100,12 @@ PUBLIC_ANNOTATIONS = {
     "nginx.webathome.org/is-public": "true",
 }
 FRONT_DOOR = ("nginx.webathome.org/", "dns.webathome.org/")
-# The sign-in. No OIDC_AUDIENCE: the audience defaults to the client id, under whose
+# The production stage and the internals fact (the copy-diagnostics button, a 500's exception
+# text), and the sign-in. No OIDC_AUDIENCE: the audience defaults to the client id, under whose
 # resource_access the backend's editor gate reads the role.
 BACKEND_ENV = {
+    "STAGE": "prd",
+    "HOMELAB_INTERNAL": "true",
     "BASEURL": f"https://{PUBLIC_HOST}",
     "OIDC_ENABLED": "true",
     "OIDC_ISSUER_URL": "https://auth.ginbov.nl/realms/homelab",
@@ -120,10 +123,10 @@ SECRET_NAME = re.compile(r"secret|password|token|(^|_)key$", re.IGNORECASE)
 # A Kubernetes dependent-env reference; `$$(` escapes a literal `$(`.
 ENV_REF = re.compile(r"(?<!\$)\$\(([A-Za-z_][A-Za-z0-9_]*)\)")
 # Env vars two containers must define alike, references resolved: the migrations run against the
-# database the backend serves from, under its secret key, and the gateway's callbacks carry the
-# secret the backend checks.
+# database the backend serves from, under its secret key, stage and internals fact, and the
+# gateway's callbacks carry the secret the backend checks.
 SHARED_ENV = {
-    ("migrate", "backend"): ("DATABASE_URL", "SECRET_KEY"),
+    ("migrate", "backend"): ("DATABASE_URL", "SECRET_KEY", "STAGE", "HOMELAB_INTERNAL"),
     ("sse-gateway", "backend"): ("SSE_CALLBACK_SECRET",),
 }
 # A bearer token written into the chart (ElectronicsInventoryDeploy's preStop header).

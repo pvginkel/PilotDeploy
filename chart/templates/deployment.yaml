@@ -65,6 +65,11 @@ spec:
                 secretKeyRef:
                   name: pilot-secret-key
                   key: password
+            # The backend's own stage and internals fact, as the backend container has them.
+            - name: STAGE
+              value: prd
+            - name: HOMELAB_INTERNAL
+              value: "true"
       containers:
         - name: backend
           image: registry:5000/pilot{{ .Values.images.pilot }}
@@ -106,8 +111,16 @@ spec:
                 secretKeyRef:
                   name: pilot-sse-callback
                   key: password
-            # The sign-in. The redirect URI and the cookie's Secure flag derive from BASEURL; the
-            # token audience, and so the client whose roles the editor gate reads, is the client id.
+            # STAGE pins the production stage, whatever the image's FLASK_ENV says. HOMELAB_INTERNAL
+            # marks the app internal: the UI shows the copy-diagnostics button and a 500 carries
+            # the exception text. The migrate init container sets both alike.
+            - name: STAGE
+              value: prd
+            - name: HOMELAB_INTERNAL
+              value: "true"
+            # The sign-in. The cookie's Secure flag derives from BASEURL; the redirect URIs come from
+            # the origin the request came in on. The token audience, and so the client whose roles
+            # the editor gate reads, is the client id.
             - name: BASEURL
               value: https://{{ required "publicHost is not set" .Values.publicHost }}
             - name: OIDC_ENABLED
