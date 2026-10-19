@@ -33,5 +33,5 @@ images:
   # The backend's and the UI's builds, registry:5000/pilot and registry:5000/pilot-ui. Every green
   # PilotApp build pins both here (cicd.writeVersionPins, ":<build number>"), editing these
   # block-style lines in place; the pin step never creates a key.
-  pilot: ':21'
-  pilotUI: ':21'
+  pilot: ':22'
+  pilotUI: ':22'
