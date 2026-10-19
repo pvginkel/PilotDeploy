@@ -12,6 +12,12 @@ oidc:
 db:
   host: postgres-pooler-rw.postgres-pas-prd.svc.cluster.local
 
+# The links in text: a ticket id opens its YouTrack issue, {id} where the id goes, and an
+# environment opens in VS Code through KubeCoder, at <base>/environments/<env-id>/ssh/open.
+links:
+  ticketUrlTemplate: https://issues.webathome.org/issue/{id}
+  environmentLinkBaseUrl: https://kubecoder.home
+
 # ESO wiring (homelab-shared.externalsecrets): the OIDC client's id and secret, from the leaf the
 # operator writes. The app's other secrets are generated in the cluster
 # (chart/templates/generated-secrets.yaml).

@@ -12,7 +12,8 @@ shows would keep the pod from starting or put a secret in the commit: an env var
 key nothing in the namespace provides, a `$(VAR)` the kubelet cannot resolve, a literal where a
 secret belongs, the public site's annotations missing or wrong, and the backend's in-pod wiring
 (its drain) off the port and path the image uses. It fails too on a container running the retired
-SSE gateway: the backend serves the browser's stream itself.
+SSE gateway: the backend serves the browser's stream itself, and on the links in text off the
+addresses prd sets or set where values leave them out.
 
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
@@ -110,6 +111,14 @@ BACKEND_ENV = {
     "OIDC_ISSUER_URL": "https://auth.ginbov.nl/realms/homelab",
 }
 ABSENT_ENV = ("OIDC_AUDIENCE", "SSE_GATEWAY_URL", "SSE_CALLBACK_SECRET")
+# The links in text (PilotApp backend/app/app_config.py, F91, F93): a ticket's YouTrack issue,
+# `{id}` where the id goes, and KubeCoder, whose <base>/environments/<env-id>/ssh/open opens an
+# environment in VS Code. The values' `links` sets them; without it the backend has neither.
+LINK_VALUES = "links"
+LINK_ENV = {
+    "TICKET_URL_TEMPLATE": "https://issues.webathome.org/issue/{id}",
+    "ENVIRONMENT_LINK_BASE_URL": "https://kubecoder.home",
+}
 # The OIDC client's leaf, which the operator writes, and the store ESO reads it through.
 STORE = {"name": "openbao-prd", "kind": "ClusterSecretStore"}
 OIDC_LEAF = f"eso/{STAGE}/pilot/{STAGE}/oidc"
@@ -482,7 +491,7 @@ def check_pod(docs):
             f"{BACKEND_PORT}",
         )
     env = env_of(backend)
-    for name, value in BACKEND_ENV.items():
+    for name, value in {**BACKEND_ENV, **LINK_ENV}.items():
         entry = env.get(name, (None, {}))[1]
         check(
             entry.get("value") == value,
@@ -560,6 +569,21 @@ def check_images():
         check(
             image == f"{repository}{pins[pin]}",
             f"container {name} runs {image}, not images.{pin}'s {repository}{pins[pin]}",
+        )
+
+
+def check_links_unset():
+    """Without the values' links, no container has a link setting: the text shows unlinked."""
+    result = template({**hook_parameters(), LINK_VALUES: "null"})
+    if result.returncode != 0:
+        sys.exit(f"helm template without {LINK_VALUES} failed:\n{result.stderr}")
+    deployment = find(objects(result.stdout), "Deployment", DEPLOYMENT)
+    check(deployment is not None, f"without {LINK_VALUES} in values, no Deployment/{DEPLOYMENT}")
+    for container in pod_containers(deployment) if deployment else []:
+        present = sorted(name for name in env_of(container) if name in LINK_ENV)
+        check(
+            not present,
+            f"without {LINK_VALUES} in values, container {container['name']} sets {present}",
         )
 
 
@@ -765,6 +789,7 @@ def main():
     deployment = check_pod(docs)
     check_no_gateway(docs)
     check_images()
+    check_links_unset()
     if deployment is not None:
         check_env(deployment)
         check_shared_env(deployment)

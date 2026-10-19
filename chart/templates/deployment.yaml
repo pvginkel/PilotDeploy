@@ -132,6 +132,18 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.externalSecrets.secrets.oidc.targetName }}
                   key: client_secret
+            # The links in text. Each is left unset where values say nothing, and the text it
+            # would link then shows unlinked.
+            {{- with .Values.links }}
+            {{- with .ticketUrlTemplate }}
+            - name: TICKET_URL_TEMPLATE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .environmentLinkBaseUrl }}
+            - name: ENVIRONMENT_LINK_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
           # An httpGet preStop cannot read the drain bearer from a Secret, so the image's own
           # Python calls /health/drain once the endpoints have dropped the pod. It returns once the
           # lifecycle coordinator has shut down, and the process then exits.
