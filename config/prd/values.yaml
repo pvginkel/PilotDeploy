@@ -18,9 +18,13 @@ links:
   ticketUrlTemplate: https://issues.webathome.org/issue/{id}
   environmentLinkBaseUrl: https://kubecoder.home
 
-# ESO wiring (homelab-shared.externalsecrets): the OIDC client's id and secret, from the leaf the
-# operator writes. The app's other secrets are generated in the cluster
-# (chart/templates/generated-secrets.yaml).
+# KubeCoder's controller, which the backend's client calls (CONTROLLER_URL).
+controller:
+  url: https://kubecoder.home
+
+# ESO wiring (homelab-shared.externalsecrets), from the leaves the operator writes: the OIDC
+# client's id and secret, and the token of Pilot's named KubeCoder client credential. The app's
+# other secrets are generated in the cluster (chart/templates/generated-secrets.yaml).
 externalSecrets:
   storeRef:
     name: openbao-prd
@@ -34,6 +38,12 @@ externalSecrets:
         - secretKey: client_secret
           path: eso/prd/pilot/prd/oidc
           property: client_secret
+    kubecoder:
+      targetName: pilot-kubecoder
+      data:
+        - secretKey: token
+          path: eso/prd/pilot/prd/kubecoder
+          property: token
 
 images:
   # The backend's and the UI's builds, registry:5000/pilot and registry:5000/pilot-ui. Every green

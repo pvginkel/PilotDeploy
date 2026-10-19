@@ -6,6 +6,11 @@ SSE stream (/api/sse/stream) included (PilotApp frontend/nginx.conf).
 {{- /* Seconds every container of a terminating pod goes on serving: the Service drops the pod from
 its endpoints asynchronously, and traffic reaches it until it has. */}}
 {{- $endpointsLeave := 15 }}
+{{- /* Seconds the backend's preStop waits for its drain: above the lifecycle coordinator's budget
+(GRACEFUL_SHUTDOWN_TIMEOUT below), with room for its SHUTDOWN handlers. */}}
+{{- $drainTimeout := 40 }}
+{{- /* Where the backend reads the homelab root from (chart/templates/homelab-root-ca.yaml). */}}
+{{- $homelabCA := "/etc/ssl/homelab" }}
 {{- /* The Secret terraform/main.tf's module "db" writes into this namespace. */}}
 {{- $database := "pilot-db" }}
 {{- $dbHost := required "db.host is not set" .Values.db.host }}
@@ -31,8 +36,9 @@ spec:
       # Service link variables are noise to every container here.
       enableServiceLinks: false
       # Above everything the backend's preStop may take: the wait for the endpoints, then the
-      # drain's 60 s.
-      terminationGracePeriodSeconds: {{ add $endpointsLeave 60 15 }}
+      # drain's timeout, then 15 s for the process to exit. Nothing drains to completion (every
+      # job resumes from its rows on the next pod), so this is the bound, not the duration.
+      terminationGracePeriodSeconds: {{ add $endpointsLeave $drainTimeout 15 }}
       initContainers:
         # The migrations, applied to completion before the backend serves. A failed run exits
         # non-zero and the kubelet retries it. The image sets FLASK_ENV=production, under which
@@ -144,6 +150,27 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            # KubeCoder's controller, under Pilot's named client credential; the server refuses
+            # to start in production without the URL and the token. The migrate init container
+            # sets none of the three: the migrating CLI never makes that check.
+            - name: CONTROLLER_URL
+              value: {{ required "controller.url is not set" .Values.controller.url | quote }}
+            - name: CONTROLLER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecrets.secrets.kubecoder.targetName }}
+                  key: token
+            - name: CONTROLLER_CA_FILE
+              value: {{ $homelabCA }}/homelab-root.crt
+            # The lifecycle coordinator's budget for its shutdown waiters. Every job stops within
+            # seconds and the next pod resumes it from its rows; the backend's default of 600 s is
+            # for tasks Pilot does not run.
+            - name: GRACEFUL_SHUTDOWN_TIMEOUT
+              value: "20"
+          volumeMounts:
+            - name: homelab-root-ca
+              mountPath: {{ $homelabCA }}
+              readOnly: true
           # An httpGet preStop cannot read the drain bearer from a Secret, so the image's own
           # Python calls /health/drain once the endpoints have dropped the pod. It returns once the
           # lifecycle coordinator has shut down, and the process then exits.
@@ -157,7 +184,8 @@ spec:
                     import os, time, urllib.request as r;
                     time.sleep({{ $endpointsLeave }});
                     r.urlopen(r.Request("http://localhost:3501/health/drain",
-                    headers={"Authorization": "Bearer " + os.environ["DRAIN_AUTH_KEY"]}), timeout=60)
+                    headers={"Authorization": "Bearer " + os.environ["DRAIN_AUTH_KEY"]}),
+                    timeout={{ $drainTimeout }})
           # At the app root, not under /api: the UI's nginx proxies neither.
           readinessProbe:
             httpGet:
@@ -192,3 +220,7 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
+      volumes:
+        - name: homelab-root-ca
+          configMap:
+            name: homelab-root-ca

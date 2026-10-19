@@ -1,0 +1,14 @@
+{{- /*
+The homelab root CA, against which the backend verifies KubeCoder's controller
+(CONTROLLER_CA_FILE): the controller's certificate chains to this root alone, and the image
+trusts no homelab CA. files/homelab-root.crt is a copy of Ansible's
+roles/baseline/files/homelab-root.crt, a real file rather than a symlink (Argo's repo-server
+refuses a symlink that leaves the repository), so a root rotation updates it here too.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: homelab-root-ca
+data:
+  homelab-root.crt: |
+{{ .Files.Get "files/homelab-root.crt" | indent 4 }}

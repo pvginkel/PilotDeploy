@@ -13,12 +13,16 @@ key nothing in the namespace provides, a `$(VAR)` the kubelet cannot resolve, a 
 secret belongs, the public site's annotations missing or wrong, and the backend's in-pod wiring
 (its drain) off the port and path the image uses. It fails too on a container running the retired
 SSE gateway: the backend serves the browser's stream itself, and on the links in text off the
-addresses prd sets or set where values leave them out.
+addresses prd sets or set where values leave them out. It fails on the backend's KubeCoder
+controller off prd's address, its token off the operator's leaf or handed to the migrations, or its
+CA file other than the homelab root mounted read-only; and on the pod's shutdown timing off the
+three values it is sized to.
 
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
 
 import ast
+import base64
 import pathlib
 import re
 import subprocess
@@ -111,6 +115,28 @@ BACKEND_ENV = {
     "OIDC_ISSUER_URL": "https://auth.ginbov.nl/realms/homelab",
 }
 ABSENT_ENV = ("OIDC_AUDIENCE", "SSE_GATEWAY_URL", "SSE_CALLBACK_SECRET")
+# KubeCoder's controller (PilotApp backend/app/app_config.py): prd's address, the token of Pilot's
+# named client credential, and CONTROLLER_CA_FILE, the homelab root the controller's certificate
+# chains to, which the image does not trust. The migrations never call the controller, so the
+# migrate init container sets none of the three.
+CONTROLLER_ENV = {"CONTROLLER_URL": "https://kubecoder.home"}
+CONTROLLER_VARS = ("CONTROLLER_URL", "CONTROLLER_TOKEN", "CONTROLLER_CA_FILE")
+CA_FILE_ENV = "CONTROLLER_CA_FILE"
+# The root's common name, which a self-signed certificate's DER carries twice: issuer and subject.
+HOMELAB_ROOT_CN = b"homelab-ca Root CA"
+PEM_CERTIFICATE = re.compile(
+    r"-----BEGIN CERTIFICATE-----\n([A-Za-z0-9+/=\n]+)-----END CERTIFICATE-----\n?"
+)
+# The shutdown timing. Nothing drains to completion: every job stops within seconds and the next
+# pod resumes it from its rows. So the lifecycle coordinator's budget for its waiters is 20 s, the
+# preStop waits 40 s for the drain, above that budget with room for the SHUTDOWN handlers, and the
+# grace covers the preStop's wait for the endpoints, its 40 s and 15 s for the process to exit.
+SHUTDOWN_ENV = {"GRACEFUL_SHUTDOWN_TIMEOUT": "20"}
+DRAIN_TIMEOUT = 40
+GRACE_SECONDS = 70
+# The preStop's Python: its wait for the endpoints, and the drain call's timeout.
+SCRIPT_SLEEP = re.compile(r"time\.sleep\(([0-9]+)\)")
+SCRIPT_TIMEOUT = re.compile(r"timeout=([0-9]+)")
 # The links in text (PilotApp backend/app/app_config.py, F91, F93): a ticket's YouTrack issue,
 # `{id}` where the id goes, and KubeCoder, whose <base>/environments/<env-id>/ssh/open opens an
 # environment in VS Code. The values' `links` sets them; without it the backend has neither.
@@ -119,10 +145,16 @@ LINK_ENV = {
     "TICKET_URL_TEMPLATE": "https://issues.webathome.org/issue/{id}",
     "ENVIRONMENT_LINK_BASE_URL": "https://kubecoder.home",
 }
-# The OIDC client's leaf, which the operator writes, and the store ESO reads it through.
+# The store ESO reads through, and the leaves the operator writes, each read by the backend's env
+# var from the Secret an ExternalSecret fills: {var: (Secret, leaf, property)}.
 STORE = {"name": "openbao-prd", "kind": "ClusterSecretStore"}
 OIDC_LEAF = f"eso/{STAGE}/pilot/{STAGE}/oidc"
-OIDC_ENV = {"OIDC_CLIENT_ID": "client_id", "OIDC_CLIENT_SECRET": "client_secret"}
+KUBECODER_LEAF = f"eso/{STAGE}/pilot/{STAGE}/kubecoder"
+LEAF_ENV = {
+    "OIDC_CLIENT_ID": ("pilot-oidc", OIDC_LEAF, "client_id"),
+    "OIDC_CLIENT_SECRET": ("pilot-oidc", OIDC_LEAF, "client_secret"),
+    "CONTROLLER_TOKEN": ("pilot-kubecoder", KUBECODER_LEAF, "token"),
+}
 # The secrets ESO generates in the cluster, once each; a Password generator yields key `password`.
 GENERATED = {"pilot-secret-key", "pilot-drain-auth"}
 GENERATOR_KEY = "password"
@@ -491,7 +523,7 @@ def check_pod(docs):
             f"{BACKEND_PORT}",
         )
     env = env_of(backend)
-    for name, value in {**BACKEND_ENV, **LINK_ENV}.items():
+    for name, value in {**BACKEND_ENV, **LINK_ENV, **CONTROLLER_ENV, **SHUTDOWN_ENV}.items():
         entry = env.get(name, (None, {}))[1]
         check(
             entry.get("value") == value,
@@ -535,6 +567,77 @@ def check_wiring(deployment):
         reads and all(name in defined for name in reads),
         f"the backend's preStop reads env {reads}, of which the backend defines "
         f"{[name for name in reads if name in defined]}",
+    )
+
+
+def check_timing(deployment):
+    """The grace and the preStop's drain timeout are the values the shutdown is sized to, and the
+    grace covers everything the preStop may take."""
+    spec = deployment["spec"]["template"]["spec"]
+    check(
+        spec.get("terminationGracePeriodSeconds") == GRACE_SECONDS,
+        f"the pod's terminationGracePeriodSeconds is {spec.get('terminationGracePeriodSeconds')}, "
+        f"not {GRACE_SECONDS}",
+    )
+    backend = named(deployment, "backend")
+    command = " ".join(
+        ((backend.get("lifecycle") or {}).get("preStop") or {}).get("exec", {}).get("command")
+        or []
+    )
+    sleeps = [int(n) for n in SCRIPT_SLEEP.findall(command)]
+    timeouts = [int(n) for n in SCRIPT_TIMEOUT.findall(command)]
+    check(
+        timeouts == [DRAIN_TIMEOUT],
+        f"the backend's preStop waits {timeouts} s for its drain, not {DRAIN_TIMEOUT}",
+    )
+    check(
+        len(sleeps) == 1 and sum(sleeps) + DRAIN_TIMEOUT < GRACE_SECONDS,
+        f"the backend's preStop sleeps {sleeps} s and waits {DRAIN_TIMEOUT} s for its drain, "
+        f"which the grace of {GRACE_SECONDS} s does not cover",
+    )
+
+
+def ca_certificate(text):
+    """The DER of `text` when it is exactly one PEM certificate, else None."""
+    match = PEM_CERTIFICATE.fullmatch(text)
+    return base64.b64decode(match.group(1)) if match else None
+
+
+def check_controller(docs, deployment):
+    """The backend's CONTROLLER_CA_FILE is the homelab root, mounted read-only from a ConfigMap
+    the chart renders; the migrations get none of the controller's settings."""
+    migrate = env_of(named(deployment, "migrate"))
+    present = sorted(name for name in migrate if name in CONTROLLER_VARS)
+    check(
+        not present,
+        f"the migrate init container sets {present}, which the migrations never read",
+    )
+
+    backend = named(deployment, "backend")
+    path = env_of(backend).get(CA_FILE_ENV, (None, {}))[1].get("value") or ""
+    mounts = [
+        mount for mount in backend.get("volumeMounts") or []
+        if path.startswith(mount["mountPath"].rstrip("/") + "/")
+    ]
+    check(
+        len(mounts) == 1,
+        f"the backend's {CA_FILE_ENV} {path!r} lies under {len(mounts)} of its mounts, not one",
+    )
+    if len(mounts) != 1:
+        return
+    mount = mounts[0]
+    check(mount.get("readOnly") is True, f"the backend mounts {mount['name']} writable")
+    volumes = deployment["spec"]["template"]["spec"].get("volumes") or []
+    source = next((v for v in volumes if v["name"] == mount["name"]), {}).get("configMap") or {}
+    relative = path[len(mount["mountPath"].rstrip("/")) + 1:]
+    items = {item["path"]: item["key"] for item in source.get("items") or []}
+    key = items.get(relative) if items else relative
+    config_map = find(docs, "ConfigMap", source.get("name")) or {}
+    der = ca_certificate((config_map.get("data") or {}).get(key) or "")
+    check(
+        der is not None and der.count(HOMELAB_ROOT_CN) == 2,
+        f"the backend's {CA_FILE_ENV} {path} is key {key} of the ConfigMap {source.get('name')}, "
+        f"which is not one PEM certificate issued by and to {HOMELAB_ROOT_CN.decode()}",
     )
 
 
@@ -674,8 +777,12 @@ def check_external_secrets(docs, deployment):
             )
 
     env = env_of(named(deployment, "backend"))
-    for var, prop in OIDC_ENV.items():
+    for var, (secret, leaf, prop) in LEAF_ENV.items():
         ref = secret_ref(env.get(var, (None, {}))[1]) or {}
+        check(
+            ref.get("name") == secret,
+            f"the backend's {var} reads the Secret {ref.get('name')}, not {secret}",
+        )
         filled = [
             doc for doc in secrets
             if (doc["spec"].get("target") or {}).get("name") == ref.get("name")
@@ -686,8 +793,8 @@ def check_external_secrets(docs, deployment):
             if item["secretKey"] == ref.get("key")
         ]
         check(
-            sources == [{"key": OIDC_LEAF, "property": prop}],
-            f"the backend's {var} reads {ref}, which no ExternalSecret fills from {OIDC_LEAF} "
+            sources == [{"key": leaf, "property": prop}],
+            f"the backend's {var} reads {ref}, which no ExternalSecret fills from {leaf} "
             f"property {prop}: {sources}",
         )
 
@@ -797,6 +904,8 @@ def main():
         check_external_secrets(docs, deployment)
         check_public_service(docs, deployment)
         check_wiring(deployment)
+        check_timing(deployment)
+        check_controller(docs, deployment)
     check_render_stable(first)
 
     if failures:
