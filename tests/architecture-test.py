@@ -5,12 +5,11 @@ Run after `cexec aac-tools gen-architecture --stage prd --producer pilot-deploy`
 modes:
 
 - plain, after a run against the published dataset, as AaC/PilotDeploy generates: whether or not
-  the `pilot-app` producer is published, the four containers are the pod's instances, the gateway's
-  specializes the estate's product, and pilot.ginbov.nl is the one exposed host, a web UI, on the
-  UI's service and never on the gateway's;
+  the `pilot-app` producer is published, the three containers are the pod's instances and
+  pilot.ginbov.nl is the one exposed host, a web UI, on the UI's service;
 - `--resolved`, after a run with PilotApp's model overlaid (ARCH_DATASET_OVERLAY): every mapping
-  resolves, the host is on the UI's service, and the backend is Served by the database pooler,
-  Keycloak and the pod's gateway, the migrations by the pooler.
+  resolves, the host is on the UI's service, and the backend is Served by the database pooler and
+  Keycloak, the migrations by the pooler.
 
 gen-architecture reports a product or a recipe it cannot resolve as a gap and exits 0, so this is
 what fails.
@@ -32,11 +31,9 @@ PRODUCTS = {
     "migrate": "app:pilot",
     "backend": "app:pilot",
     "ui": "app:pilot-ui",
-    "sse-gateway": "app:ssegateway",
 }
-# The UI's service, the `pilot-app` producer's, and the gateway's, which the host must never take.
+# The UI's service, the `pilot-app` producer's.
 UI_SERVICE = "svc:pilot-ui-web"
-GATEWAY_SERVICE = "svc:ssegateway"
 # The providers config/prd/values.yaml points the backend at: db.host's pooler and the Service
 # behind auth.ginbov.nl, as the published dataset names their instances.
 POOLER = "ss:postgres-pas-prd-postgres-pooler-rw"
@@ -106,7 +103,7 @@ def check_products(doc, inst, must_resolve):
             [bare(t) for t in targets] == [product],
             f"container {container} specializes {targets}, not {product}",
         )
-        if must_resolve or product == "app:ssegateway":
+        if must_resolve:
             check(
                 all(resolved(t) for t in targets),
                 f"container {container}'s product {targets} resolves to no producer",
@@ -128,7 +125,6 @@ def check_public_host(doc, inst, must_resolve):
         services = [r["target"] for r in relations(doc, "Assignment", source=interface["id"])]
         check(len(services) == 1, f"{PUBLIC_HOST} is assigned to {services}, not one service")
         for service in services:
-            check(bare(service) != GATEWAY_SERVICE, f"{PUBLIC_HOST} is assigned to the gateway's {service}")
             if must_resolve:
                 check(
                     bare(service) == UI_SERVICE and resolved(service),
@@ -148,7 +144,7 @@ def check_served(doc, inst):
         return {bare(r["source"]) for r in relations(doc, "Serving", target=inst.get(container))}
 
     wanted = {
-        "backend": {POOLER: "DATABASE_URL", KEYCLOAK: "OIDC_ISSUER_URL", bare(inst.get("sse-gateway", "")): "SSE_GATEWAY_URL"},
+        "backend": {POOLER: "DATABASE_URL", KEYCLOAK: "OIDC_ISSUER_URL"},
         "migrate": {POOLER: "DATABASE_URL"},
     }
     for container, providers in wanted.items():

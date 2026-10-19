@@ -35,6 +35,3 @@ images:
   # block-style lines in place; the pin step never creates a key.
   pilot: ':21'
   pilotUI: ':21'
-  # registry:5000/ssegateway, pinned by hand to the build the estate's other gateways run.
-  # SSEGateway's build writes no pin here.
-  sseGateway: ':64'

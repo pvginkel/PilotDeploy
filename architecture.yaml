@@ -9,15 +9,13 @@ introduced: '2026-10-14'
 # Pilot's products, services and edges are the `pilot-app` producer's (pvginkel/PilotApp), so the
 # layer references its app:* products and the generator resolves them to that producer's UUIDs. The
 # backend's image runs both the `migrate` init container and the `backend` container; the UI is the
-# app's second image, the SSE gateway the homelab's shared one.
+# app's second image.
 images:
   pilot: app:pilot
   pilot-ui: app:pilot-ui
-  ssegateway: app:ssegateway
 
-# The Service's port `http` is the UI's nginx, the pod's front. Without this entry, a run that cannot
-# resolve app:pilot-ui (its producer unpublished) gives the host to the one in-house service the pod
-# still resolves, the SSE gateway's.
+# The Service's port `http` is the UI's nginx, the pod's front. The entry names it outright, so the
+# host is the UI's whether or not app:pilot-ui resolves.
 exposures:
   pilot: ui
 

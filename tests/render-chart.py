@@ -10,8 +10,9 @@ the repo-server builds it.
 Beyond the frame (the library, the pins, the namespace, the hook), it fails on what the render
 shows would keep the pod from starting or put a secret in the commit: an env var reading a Secret
 key nothing in the namespace provides, a `$(VAR)` the kubelet cannot resolve, a literal where a
-secret belongs, the public site's annotations missing or wrong, and the containers' in-pod wiring
-(the gateway's port, its callback URL, the backend's drain) off the ports and paths the images use.
+secret belongs, the public site's annotations missing or wrong, and the backend's in-pod wiring
+(its drain) off the port and path the image uses. It fails too on a container running the retired
+SSE gateway: the backend serves the browser's stream itself.
 
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
@@ -43,9 +44,9 @@ HOOK_REVISION = "0123456789abcdef0123456789abcdef01234567"
 # Where the library's Job template puts the hook (homelab-shared templates/_tf-presync-hook.tpl).
 HOOK_NAMESPACE = "argocd-hooks"
 HOOK_GUARD = "is required by the Terraform PreSync hook"
-# The image slots of config/prd/values.yaml. PilotApp's build writes the first two
-# (cicd.writeVersionPins, its Jenkinsfile's "Write image pins"); the gateway's is set by hand.
-PINS = ("images.pilot", "images.pilotUI", "images.sseGateway")
+# The image slots of config/prd/values.yaml, which PilotApp's build writes (cicd.writeVersionPins,
+# its Jenkinsfile's "Write image pins").
+PINS = ("images.pilot", "images.pilotUI")
 # A registry:5000 image's per-build tag, as the pin step writes it.
 TAG_PIN = re.compile(r":[0-9]+")
 # A key line as cicd.writeVersionPins matches it (JenkinsPipelineUtils vars/cicd.groovy, applyPins).
@@ -70,8 +71,10 @@ CONTAINER_IMAGES = {
     "migrate": ("registry:5000/pilot", "pilot"),
     "backend": ("registry:5000/pilot", "pilot"),
     "ui": ("registry:5000/pilot-ui", "pilotUI"),
-    "sse-gateway": ("registry:5000/ssegateway", "sseGateway"),
 }
+# The SSE gateway's image, retired: the backend serves the browser's stream itself
+# (GET /api/sse/stream, backend/app/api/sse.py), behind the UI's nginx `location /api/`.
+GATEWAY_IMAGE = "ssegateway"
 # PilotApp's contracts: the backend's port (backend/app/consts.py DEFAULT_BACKEND_PORT) and its
 # health routes at the app root (backend/app/__init__.py), the UI's nginx port
 # (frontend/nginx.conf), and the migration command (backend/app/cli.py, run as a module: the image
@@ -80,13 +83,8 @@ BACKEND_PORT = 3501
 UI_PORT = 3500
 BACKEND_PROBES = {"readinessProbe": "/health/readyz", "livenessProbe": "/health/healthz"}
 MIGRATE_ARGS = ["python", "-m", "app.cli", "upgrade-db"]
-# The pod's in-pod wiring, over loopback: the gateway listens on the port the UI's nginx proxies
-# /api/sse/ to (frontend/nginx.conf) and the backend's SSE_GATEWAY_URL names
-# (backend/app/config.py); it calls back the backend's /api/sse/callback (backend/app/api/sse.py);
-# the backend's preStop drains through /health/drain (backend/app/api/health.py) with a bearer from
-# its own env.
-GATEWAY_PORT = 3502
-CALLBACK_PATH = "/api/sse/callback"
+# The pod's in-pod wiring, over loopback: the backend's preStop drains through /health/drain
+# (backend/app/api/health.py) with a bearer from its own env.
 DRAIN_PATH = "/health/drain"
 LOOPBACK = ("localhost", "127.0.0.1")
 # A URL in the preStop's Python, and an env var it reads.
@@ -102,7 +100,8 @@ PUBLIC_ANNOTATIONS = {
 FRONT_DOOR = ("nginx.webathome.org/", "dns.webathome.org/")
 # The production stage and the internals fact (the copy-diagnostics button, a 500's exception
 # text), and the sign-in. No OIDC_AUDIENCE: the audience defaults to the client id, under whose
-# resource_access the backend's editor gate reads the role.
+# resource_access the backend's editor gate reads the role. No SSE gateway settings: the backend
+# serves the stream itself and reads neither (backend/app/config.py).
 BACKEND_ENV = {
     "STAGE": "prd",
     "HOMELAB_INTERNAL": "true",
@@ -110,24 +109,22 @@ BACKEND_ENV = {
     "OIDC_ENABLED": "true",
     "OIDC_ISSUER_URL": "https://auth.ginbov.nl/realms/homelab",
 }
-ABSENT_ENV = ("OIDC_AUDIENCE",)
+ABSENT_ENV = ("OIDC_AUDIENCE", "SSE_GATEWAY_URL", "SSE_CALLBACK_SECRET")
 # The OIDC client's leaf, which the operator writes, and the store ESO reads it through.
 STORE = {"name": "openbao-prd", "kind": "ClusterSecretStore"}
 OIDC_LEAF = f"eso/{STAGE}/pilot/{STAGE}/oidc"
 OIDC_ENV = {"OIDC_CLIENT_ID": "client_id", "OIDC_CLIENT_SECRET": "client_secret"}
 # The secrets ESO generates in the cluster, once each; a Password generator yields key `password`.
-GENERATED = {"pilot-secret-key", "pilot-drain-auth", "pilot-sse-callback"}
+GENERATED = {"pilot-secret-key", "pilot-drain-auth"}
 GENERATOR_KEY = "password"
 # An env var or query parameter named like this carries a secret, so never a literal.
 SECRET_NAME = re.compile(r"secret|password|token|(^|_)key$", re.IGNORECASE)
 # A Kubernetes dependent-env reference; `$$(` escapes a literal `$(`.
 ENV_REF = re.compile(r"(?<!\$)\$\(([A-Za-z_][A-Za-z0-9_]*)\)")
 # Env vars two containers must define alike, references resolved: the migrations run against the
-# database the backend serves from, under its secret key, stage and internals fact, and the
-# gateway's callbacks carry the secret the backend checks.
+# database the backend serves from, under its secret key, stage and internals fact.
 SHARED_ENV = {
     ("migrate", "backend"): ("DATABASE_URL", "SECRET_KEY", "STAGE", "HOMELAB_INTERNAL"),
-    ("sse-gateway", "backend"): ("SSE_CALLBACK_SECRET",),
 }
 # A bearer token written into the chart (ElectronicsInventoryDeploy's preStop header).
 LITERAL_BEARER = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{8,}")
@@ -278,6 +275,8 @@ def check_pin_slots():
             isinstance(value, str) and TAG_PIN.fullmatch(value) is not None,
             f"config/{STAGE}/values.yaml pins {pin} to {value!r}, not a tag suffix ':<build>'",
         )
+    stale = sorted(f"images.{name}" for name in images if f"images.{name}" not in PINS)
+    check(not stale, f"config/{STAGE}/values.yaml pins {stale}, beyond the pod's slots {list(PINS)}")
 
 
 def check_namespace_manifest(docs):
@@ -456,8 +455,8 @@ def check_pod(docs):
         "containers": [c["name"] for c in spec["containers"]],
     }
     check(
-        names == {"initContainers": ["migrate"], "containers": ["backend", "ui", "sse-gateway"]},
-        f"the pod runs {names}, not the migrations before the backend, the UI and the gateway",
+        names == {"initContainers": ["migrate"], "containers": ["backend", "ui"]},
+        f"the pod runs {names}, not the migrations before the backend and the UI",
     )
     for name in CONTAINER_IMAGES:
         container = named(deployment, name)
@@ -509,23 +508,8 @@ def loopback(url, port, path):
 
 
 def check_wiring(deployment):
-    """The containers reach each other over loopback on the ports and paths the images use."""
-    gateway = named(deployment, "sse-gateway")
-    env = env_of(gateway)
-    port = env.get("PORT", (None, {}))[1].get("value")
-    declared = [p["containerPort"] for p in gateway.get("ports") or []]
-    check(
-        port == str(GATEWAY_PORT) and declared == [GATEWAY_PORT],
-        f"the gateway listens on PORT {port!r} and declares {declared}, not {GATEWAY_PORT}, where "
-        "the UI's nginx and the backend reach it",
-    )
-    callback = env.get("CALLBACK_URL", (None, {}))[1].get("value") or ""
-    check(
-        loopback(callback, BACKEND_PORT, CALLBACK_PATH),
-        f"the gateway's CALLBACK_URL is {callback!r}, not the backend's {CALLBACK_PATH} on "
-        f"localhost:{BACKEND_PORT}",
-    )
-
+    """The backend's preStop reaches its drain over loopback, on the port and path the image
+    uses."""
     backend = named(deployment, "backend")
     command = " ".join(
         ((backend.get("lifecycle") or {}).get("preStop") or {}).get("exec", {}).get("command")
@@ -543,6 +527,23 @@ def check_wiring(deployment):
         f"the backend's preStop reads env {reads}, of which the backend defines "
         f"{[name for name in reads if name in defined]}",
     )
+
+
+def image_name(image):
+    """An image reference's repository name, without registry, path, tag or digest."""
+    return image.split("@", 1)[0].rsplit("/", 1)[-1].split(":", 1)[0]
+
+
+def check_no_gateway(docs):
+    """No pod the chart renders runs the retired SSE gateway."""
+    for doc in docs:
+        spec = ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
+        for container in [*(spec.get("initContainers") or []), *(spec.get("containers") or [])]:
+            check(
+                image_name(container.get("image") or "") != GATEWAY_IMAGE,
+                f"{label(doc)}'s container {container['name']} runs {container.get('image')}, the "
+                "retired SSE gateway; the backend serves the stream itself",
+            )
 
 
 def check_images():
@@ -666,6 +667,11 @@ def check_external_secrets(docs, deployment):
             f"property {prop}: {sources}",
         )
 
+    generators = sorted(doc["metadata"]["name"] for doc in docs if doc["kind"] == "Password")
+    check(
+        generators == sorted(GENERATED),
+        f"the chart generates the secrets {generators}, not {sorted(GENERATED)}",
+    )
     for name in sorted(GENERATED):
         generator = find(docs, "Password", name)
         secret = find(docs, "ExternalSecret", name)
@@ -757,6 +763,7 @@ def main():
     check_scope(docs)
     check_no_literal_secrets(docs, first)
     deployment = check_pod(docs)
+    check_no_gateway(docs)
     check_images()
     if deployment is not None:
         check_env(deployment)

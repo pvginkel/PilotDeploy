@@ -1,7 +1,7 @@
 {{- /*
-Pilot: the Flask backend, the UI's nginx and the SSE gateway in one pod, reaching each other over
-loopback. The UI's nginx is the pod's front: it serves the SPA and proxies /api/sse/ to the gateway
-and /api/ to the backend (PilotApp frontend/nginx.conf).
+Pilot: the Flask backend and the UI's nginx in one pod, reaching each other over loopback. The
+UI's nginx is the pod's front: it serves the SPA and proxies /api/ to the backend, the browser's
+SSE stream (/api/sse/stream) included (PilotApp frontend/nginx.conf).
 */}}
 {{- /* Seconds every container of a terminating pod goes on serving: the Service drops the pod from
 its endpoints asynchronously, and traffic reaches it until it has. */}}
@@ -106,11 +106,6 @@ spec:
                 secretKeyRef:
                   name: pilot-drain-auth
                   key: password
-            - name: SSE_CALLBACK_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: pilot-sse-callback
-                  key: password
             # STAGE pins the production stage, whatever the image's FLASK_ENV says. HOMELAB_INTERNAL
             # marks the app internal: the UI shows the copy-diagnostics button and a 500 carries
             # the exception text. The migrate init container sets both alike.
@@ -183,36 +178,5 @@ spec:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 10
-        - name: sse-gateway
-          image: registry:5000/ssegateway{{ required "images.sseGateway is not set" .Values.images.sseGateway }}
-          ports:
-            - name: sse
-              containerPort: 3502
-          env:
-            - name: SSE_CALLBACK_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: pilot-sse-callback
-                  key: password
-            - name: CALLBACK_URL
-              value: http://localhost:3501/api/sse/callback?secret=$(SSE_CALLBACK_SECRET)
-            - name: PORT
-              value: "3502"
-          lifecycle:
-            preStop:
-              sleep:
-                seconds: {{ $endpointsLeave }}
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: sse
-            initialDelaySeconds: 2
-            periodSeconds: 3
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: sse
             initialDelaySeconds: 10
             periodSeconds: 10
