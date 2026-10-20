@@ -4,10 +4,15 @@ Pilot's deploy repository: its Helm chart and per-stage configuration. The app i
 `pvginkel/PilotApp`.
 
 **Two stages**, each an Argo CD Application on the prd cluster that renders `chart/` with
-`config/<stage>/`: `pilot-prd`, production at `https://pilot.ginbov.nl`, public, on the operator's
-KubeCoder; and `pilot-dev` at `https://pilot-dev.home`, internal, with its own Keycloak client,
-database (`pilot_dev_db`) and secrets, on `kubecoder-dev`'s fleet. prd's Terraform state owns the
-repository's webhook (`manage_webhook`), dev's none.
+`config/<stage>/`: `pilot-dev` at `https://pilot-dev.home`, internal, with its own Keycloak client,
+database (`pilot_dev_db`) and secrets, on `kubecoder-dev`'s fleet, follows `main`; and `pilot-prd`,
+production at `https://pilot.ginbov.nl`, public, on the operator's KubeCoder, follows the `prd`
+branch. Every green PilotApp build pins `:dev-<n>` into `config/dev/` and `:prd-<n>` into
+`config/prd/` in one commit on `main`, so dev rolls to it and production waits for a promotion: the
+job `PilotApp/Promote-PRD` (`Jenkinsfile.promote`), started by hand, retags `pilot`, `pilot-ui` and
+`pilot-sync` from `dev-<n>` to `prd-<n>`, fast-forwards `prd` to a commit on `main`, its tip unless
+the run names another, and tags that commit `release-<m>`. A rollback is a revert on `main`,
+promoted. prd's Terraform state owns the repository's webhook (`manage_webhook`), dev's none.
 
 **Rotation keepers** are the `rotation_epoch` map in each stage's `config/<stage>/rotation.tfvars`,
 which `terraform/main.tf` passes to the credentials it mints: `db` re-mints the Postgres role's

@@ -1,0 +1,270 @@
+// Pilot's promote job: moves a validated commit on main to prd, the branch Argo CD's pilot-prd
+// syncs from. Started by hand, it promotes main's tip unless `commit` names an earlier commit on
+// main. It retags the commit's prd images in registry:5000, fast-forwards prd to the commit, and
+// pushes an annotated release-<m> tag, <m> this job's build number.
+//
+// The order, each step run only once the one before it succeeded, so prd never names a prd-<n>
+// tag that does not exist:
+//   1. pilot and pilot-ui, which the commit's config/prd/values.yaml pins to prd-<n>, and
+//      pilot-sync, which no values file pins, of the same build <n>, get the tag prd-<n>,
+//      retagged from PilotApp/Build-Main's dev-<n>;
+//   2. prd fast-forwards to the commit;
+//   3. the release-<m> tag goes on the commit.
+//
+// A re-run for the commit prd already names finishes a promotion whose step 3 failed: when no
+// release-* tag points at the commit, the job runs step 3 alone. A commit a release tag records
+// has nothing left to promote: the run succeeds and skips all three steps. A run with `commit`
+// empty refuses while no release tag records prd's tip, and names it, so a bare re-run cannot
+// pass over a stuck release. The one unrecorded tip it admits is the commit prd was created at by
+// hand before the first promotion: no promotion made it, and its config/prd pins no prd-<n> tag,
+// where every commit this job moves prd to pins them.
+//
+// No rollback parameter and no force-move: a rollback is a revert on main, promoted like any
+// other commit.
+//
+// Controller config:
+//   - Job: PilotApp/Promote-PRD
+//   - SCM: pvginkel/PilotDeploy, branch main
+//   - Script Path: Jenkinsfile.promote
+
+library identifier: 'JenkinsPipelineUtils', changelog: false
+
+/**
+ * The images a prd values file releases, as the references prd deploys: `images.pilot` and
+ * `images.pilotUI`, the tag suffixes the chart appends to `registry:5000/pilot` and
+ * `registry:5000/pilot-ui`, and `registry:5000/pilot-sync`, which no values file pins, at the
+ * build those two pin.
+ *
+ * Both suffixes must be `:prd-<n>` with the same <n>, one PilotApp/Build-Main build's, which is
+ * also what keeps each reference safe to quote into a shell line.
+ *
+ * @param values  config/prd/values.yaml of the commit being promoted, as readYaml parses it.
+ * @return [image:, build: '<n>', tag: 'prd-<n>'] per image.
+ */
+List<Map<String, String>> prdPins(Map values) {
+    Map images = values.images instanceof Map ? values.images : [:]
+
+    List<String> keys = ['pilot', 'pilotUI']
+    String build = null
+    for (int i = 0; i < keys.size(); i++) {
+        String suffix = images[keys[i]]?.toString()
+        if (suffix == null || !(suffix ==~ /:prd-[0-9]+/)) {
+            error("config/prd/values.yaml pins images.${keys[i]} to '${suffix}', not a :prd-<n> tag")
+        }
+        String pinned = suffix.substring(':prd-'.length())
+        if (build != null && pinned != build) {
+            error("config/prd/values.yaml pins images.pilot to prd-${build} and images.pilotUI to " +
+                "prd-${pinned}: one PilotApp/Build-Main build pins both")
+        }
+        build = pinned
+    }
+
+    List<String> names = ['pilot', 'pilot-ui', 'pilot-sync']
+    List<Map<String, String>> pins = []
+    for (int i = 0; i < names.size(); i++) {
+        pins << [image: "registry:5000/${names[i]}".toString(), build: build, tag: "prd-${build}".toString()]
+    }
+    return pins
+}
+
+/**
+ * Whether a prd values file pins any prd-<n> tag. Every commit this job moves prd to pins only
+ * prd-<n> tags (prdPins); the commit prd was created at by hand pins bare build numbers.
+ *
+ * @param values  config/prd/values.yaml of a commit, as readYaml parses it.
+ */
+boolean pinsPrdTag(Map values) {
+    Map images = values.images instanceof Map ? values.images : [:]
+    List<String> keys = ['pilot', 'pilotUI']
+    for (int i = 0; i < keys.size(); i++) {
+        String suffix = images[keys[i]]?.toString()
+        if (suffix != null && suffix ==~ /:prd-[0-9]+/) {
+            return true
+        }
+    }
+    return false
+}
+
+// Set by the Validate commit stage, read by the stages after it.
+String promoted
+boolean released = false
+boolean recordOnly = false
+List<Map<String, String>> pins
+
+pipeline {
+    agent {
+        kubernetes {
+            inheritFrom 'jenkins-agent'
+            yaml podYaml(templates: ['k8s'])
+        }
+    }
+
+    options {
+        // Without abortPrevious: an abort between the retag, the prd push and the tag push leaves
+        // the promotion half made.
+        disableConcurrentBuilds()
+        skipDefaultCheckout()
+        timeout(time: 60, unit: 'MINUTES')
+        timestamps()
+    }
+
+    parameters {
+        string(name: 'commit', defaultValue: '', trim: true,
+            description: 'SHA of the commit on main to promote, full or abbreviated. Empty promotes the tip of main.')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        // `checkout scm` fetches every branch and tag of the repo, which is all this gate reads.
+        stage('Validate commit') {
+            steps {
+                script {
+                    String requested = params.commit ?: ''
+                    if (requested && !(requested ==~ /[0-9a-f]{7,40}/)) {
+                        error("commit must be the SHA of a commit on main, full or abbreviated; got '${requested}'")
+                    }
+                    promoted = sh(script: "git rev-parse --verify '${requested ?: 'origin/main'}^{commit}'", returnStdout: true).trim()
+
+                    if (sh(script: "git merge-base --is-ancestor '${promoted}' origin/main", returnStatus: true) != 0) {
+                        error("${promoted} is not on main, and prd carries only commits main does")
+                    }
+
+                    String current = sh(script: 'git rev-parse --quiet --verify refs/remotes/origin/prd || true', returnStdout: true).trim()
+                    boolean createdByHand = current &&
+                        !pinsPrdTag(readYaml(text: sh(script: "git show '${current}:config/prd/values.yaml'", returnStdout: true)))
+                    if (current == promoted) {
+                        if (createdByHand) {
+                            error("prd is at ${promoted}, the commit it was created at by hand, which pins no " +
+                                'prd-<n> tag: nothing to promote or record; promote a later commit on main')
+                        }
+                        String recorded = sh(script: "git tag --list 'release-*' --points-at '${promoted}'", returnStdout: true).trim()
+                        if (recorded) {
+                            released = true
+                            currentBuild.description = "${promoted.substring(0, 12)} already released as " +
+                                "${recorded.replace('\n', ', ')}: nothing promoted"
+                            echo "pvginkel/PilotDeploy ${promoted} already on prd: nothing pushed."
+                            return
+                        }
+                        recordOnly = true
+                    }
+                    // A run from defaults after main moved would pass over a promotion whose step 3
+                    // failed, and that commit could no longer be recorded by the job. The commit prd
+                    // was created at by hand was no promotion's, so it has no step 3 to finish.
+                    if (!requested && current && current != promoted && !createdByHand &&
+                            !sh(script: "git tag --list 'release-*' --points-at '${current}'", returnStdout: true).trim()) {
+                        error("prd is at ${current}, which no release-* tag records: re-run with " +
+                            "commit=${current} to record it before promoting main")
+                    }
+                    if (current && sh(script: "git merge-base --is-ancestor '${current}' '${promoted}'", returnStatus: true) != 0) {
+                        error("prd is at ${current}, which ${promoted} does not descend from: a promotion only " +
+                            'fast-forwards prd, and a rollback is a revert on main, promoted')
+                    }
+                    if (sh(script: "git tag --list 'release-${currentBuild.number}'", returnStdout: true).trim()) {
+                        error("release-${currentBuild.number} already exists on origin")
+                    }
+
+                    pins = prdPins(readYaml(text: sh(script: "git show '${promoted}:config/prd/values.yaml'", returnStdout: true)))
+                    currentBuild.description = "release-${currentBuild.number}: ${promoted.substring(0, 12)}"
+                    if (recordOnly) {
+                        // Advance prd's handoff line, for the promotion that pushes nothing.
+                        echo "pvginkel/PilotDeploy ${promoted} already on prd: nothing pushed."
+                    }
+                }
+            }
+        }
+
+        stage('Retag images') {
+            when {
+                expression { !released && !recordOnly }
+            }
+            steps {
+                container('k8s') {
+                    script {
+                        for (int i = 0; i < pins.size(); i++) {
+                            Map<String, String> pin = pins[i]
+                            // An existing prd-<n> was retagged from dev-<n> by an earlier promotion,
+                            // whose commit a rollback promotes again, and is left as it is.
+                            sh """
+                                set -eu
+                                if crane --insecure digest '${pin.image}:${pin.tag}' >/dev/null 2>&1; then
+                                    echo '${pin.image}:${pin.tag} exists; left as it is'
+                                else
+                                    crane --insecure tag '${pin.image}:dev-${pin.build}' '${pin.tag}'
+                                fi
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Advance prd') {
+            when {
+                expression { !released && !recordOnly }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: '5f6fbd66-b41c-405f-b107-85ba6fd97f10',
+                    usernameVariable: 'GIT_USER',
+                    passwordVariable: 'GIT_TOKEN')]) {
+                    // No `+` and no --force: GitHub refuses the push unless it fast-forwards prd,
+                    // whatever moved prd since the check.
+                    sh """
+                        set -eu
+                        git clone --quiet "https://\$GIT_USER:\$GIT_TOKEN@github.com/pvginkel/PilotDeploy.git" advance
+                        git -C advance push --quiet origin '${promoted}:refs/heads/prd'
+                    """
+                }
+                // The handoff track_build.py (DockerImages kube-coder-dev-local-home) parses to
+                // follow pilot-prd's Argo CD sync, in the shape of cicd.writeVersionPins' pin line.
+                // Only this `pushed to` form moved prd and so brings a sync.
+                echo "pvginkel/PilotDeploy ${promoted} pushed to prd."
+            }
+        }
+
+        stage('Tag release') {
+            when {
+                expression { !released }
+            }
+            steps {
+                script {
+                    String references = ''
+                    for (int i = 0; i < pins.size(); i++) {
+                        references += "${pins[i].image}:${pins[i].tag}\n"
+                    }
+                    String event = recordOnly
+                        ? "${promoted} was already on prd; recorded by ${env.JOB_NAME} #${currentBuild.number}"
+                        : "${promoted} promoted to prd by ${env.JOB_NAME} #${currentBuild.number}"
+                    withEnv(["RELEASE_MESSAGE=release-${currentBuild.number}: ${event}\n\n${references}"]) {
+                        withCredentials([usernamePassword(
+                            credentialsId: '5f6fbd66-b41c-405f-b107-85ba6fd97f10',
+                            usernameVariable: 'GIT_USER',
+                            passwordVariable: 'GIT_TOKEN')]) {
+                            sh """
+                                set -eu
+                                git clone --quiet "https://\$GIT_USER:\$GIT_TOKEN@github.com/pvginkel/PilotDeploy.git" release
+                                git -C release config user.name 'jenkins'
+                                git -C release config user.email 'jenkins@webathome.org'
+                                git -C release tag -a 'release-${currentBuild.number}' -m "\$RELEASE_MESSAGE" '${promoted}'
+                                git -C release push --quiet origin 'refs/tags/release-${currentBuild.number}'
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        aborted {
+            script {
+                notify.error("${env.JOB_NAME} #${env.BUILD_NUMBER} aborted (timeout or hand)")
+            }
+        }
+    }
+}

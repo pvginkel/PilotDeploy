@@ -6,8 +6,12 @@ projects:
     description: >-
       Pilot's deploy repo: the `pilot` Helm chart on the homelab-shared library dependency, the
       dev and prd configurations Argo CD syncs it from, the Terraform its PreSync hook applies,
-      and the judgment layer of the `pilot-deploy` architecture producer, which publishes prd.
-      There is no deploy pipeline: Argo deploys each stage ArgoCDDeploy's registry carries.
+      the promotion job `PilotApp/Promote-PRD` (`Jenkinsfile.promote`), and the judgment layer of
+      the `pilot-deploy` architecture producer, which publishes prd from the `prd` branch. Argo
+      CD deploys `pilot-dev` from `main`, where every green PilotApp build pins its images, and
+      `pilot-prd` from `prd`, which only the promotion job moves: started by hand, it retags the
+      images a commit on `main` pins from `dev-<n>` to `prd-<n>`, fast-forwards `prd` to it and
+      tags the release.
     jenkins: AaC/PilotDeploy
     # helm lint reads the built dependency, so the deps step comes first. The hook.* values stand
     # in for the four helm parameters each stage's Application passes; the library
