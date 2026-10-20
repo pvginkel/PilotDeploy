@@ -1,16 +1,24 @@
 {{- /*
-The public site: the front door serves https://<publicHost> with a Let's Encrypt certificate and
-proxies it to port 80, the UI's nginx. A public site is served over HTTPS whatever enable-ssl says,
-so it carries none. Prometheus scrapes the backend's /metrics, which nginx does not proxy, on the
-pod's port 3501.
+The site at https://<host>, proxied to port 80, the UI's nginx. A public site's front door serves it
+with a Let's Encrypt certificate whatever enable-ssl says, so it carries none. An internal site is
+served over HTTPS only with enable-ssl, from a homelab step-ca certificate, and the homelab DNS
+publishes its .home name. Prometheus scrapes the backend's /metrics, which nginx does not proxy, on
+the pod's port 3501.
 */}}
+{{- $host := required "host is not set" .Values.host }}
+{{- $public := required "public is not set" .Values.public }}
 apiVersion: v1
 kind: Service
 metadata:
   name: pilot
   annotations:
-    nginx.webathome.org/server-name: {{ required "publicHost is not set" .Values.publicHost }}
+    nginx.webathome.org/server-name: {{ $host }}
+    {{- if $public }}
     nginx.webathome.org/is-public: "true"
+    {{- else }}
+    nginx.webathome.org/is-public: "false"
+    nginx.webathome.org/enable-ssl: "yes"
+    {{- end }}
     prometheus.io/scrape: "true"
     prometheus.io/path: /metrics
     prometheus.io/port: "3501"

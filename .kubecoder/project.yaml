@@ -5,21 +5,25 @@ projects:
   root:
     description: >-
       Pilot's deploy repo: the `pilot` Helm chart on the homelab-shared library dependency, the
-      prd configuration Argo CD syncs it from, the Terraform its PreSync hook applies, and the
-      judgment layer of the `pilot-deploy` architecture producer. There is no deploy pipeline:
-      Argo deploys it, once ArgoCDDeploy's registry carries it.
+      dev and prd configurations Argo CD syncs it from, the Terraform its PreSync hook applies,
+      and the judgment layer of the `pilot-deploy` architecture producer, which publishes prd.
+      There is no deploy pipeline: Argo deploys each stage ArgoCDDeploy's registry carries.
     jenkins: AaC/PilotDeploy
     # helm lint reads the built dependency, so the deps step comes first. The hook.* values stand
-    # in for the four helm parameters the Application passes; the library `required`-guards each.
+    # in for the four helm parameters each stage's Application passes; the library
+    # `required`-guards each.
     lint:
       - cexec aac-tools chart-deps
       - >-
         cexec iac helm lint chart --namespace pilot-prd --values config/prd/values.yaml
         --set hook.repo=https://github.com/pvginkel/PilotDeploy.git,hook.revision=0123456789abcdef0123456789abcdef01234567,hook.stage=prd,hook.namespace=pilot-prd
+      - >-
+        cexec iac helm lint chart --namespace pilot-dev --values config/dev/values.yaml
+        --set hook.repo=https://github.com/pvginkel/PilotDeploy.git,hook.revision=0123456789abcdef0123456789abcdef01234567,hook.stage=dev,hook.namespace=pilot-dev
       - cexec iac terraform fmt -check -diff -recursive
-    # tests/render-chart.py renders prd as the Application pilot-prd does and asserts on the
-    # objects; tf-check checks terraform/ and tests/terraform-test.py plans prd's tfvars against
-    # mocked providers.
+    # tests/render-chart.py renders each stage as its Application pilot-<stage> does and asserts
+    # on the objects; tf-check checks terraform/ and tests/terraform-test.py plans each stage's
+    # tfvars against mocked providers. The architecture is prd's alone.
     test:
       - cexec aac-tools chart-deps
       - cexec iac tests/render-chart.py

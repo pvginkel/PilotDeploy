@@ -1,7 +1,7 @@
 # config/prd/ plans Pilot's database, its role and the connection Secret, and owns the
-# repository's webhook. Run by tests/terraform-test.py with config/prd/*.tfvars; the database's
-# resources sit inside the postgres-db module, out of an assert's reach, so that script reads them
-# from run "db"'s plan.
+# repository's webhook, the one stage that does. Run by tests/terraform-test.py with
+# config/prd/*.tfvars; the database's resources sit inside the postgres-db module, out of an
+# assert's reach, so that script reads them from run "db"'s plan.
 
 mock_provider "github" {}
 mock_provider "kubernetes" {}
@@ -35,7 +35,7 @@ run "webhook" {
 
   assert {
     condition     = length(github_repository_webhook.argocd) == 1
-    error_message = "prd, the only stage, does not own the repository's webhook"
+    error_message = "prd, the stage that owns the repository's webhook, does not plan it"
   }
 
   assert {

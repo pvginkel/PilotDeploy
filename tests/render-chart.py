@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
-"""The gate: the pilot chart renders prd the way Argo CD renders it.
+"""The gate: the pilot chart renders each stage, dev and prd, the way Argo CD renders it.
 
-The stage is templated the way ArgoCDDeploy's registry has Argo produce it
-(releases/templates/applications.yaml): `chart` under the Application's own name `pilot-prd`,
-into that namespace, with `../config/prd/values.yaml` and the four `hook.*` helm parameters of
-`releases.hookParameters` as `--set`. The library dependency is built from chart/Chart.lock, as
-the repo-server builds it.
+A stage is templated the way ArgoCDDeploy's registry has Argo produce it
+(releases/templates/applications.yaml): `chart` under the Application's own name
+`pilot-<stage>`, into that namespace, with `../config/<stage>/values.yaml` and the four `hook.*`
+helm parameters of `releases.hookParameters` as `--set`. The library dependency is built from
+chart/Chart.lock, as the repo-server builds it. Every directory under config/ is a stage this
+gate knows.
 
 Beyond the frame (the library, the pins, the namespace, the hook), it fails on what the render
 shows would keep the pod from starting or put a secret in the commit: an env var reading a Secret
 key nothing in the namespace provides, a `$(VAR)` the kubelet cannot resolve, a literal where a
-secret belongs, the public site's annotations missing or wrong, and the backend's in-pod wiring
-(its drain) off the port and path the image uses. It fails too on a container running the retired
-SSE gateway: the backend serves the browser's stream itself, and on the links in text off the
-addresses prd sets or set where values leave them out. It fails on the backend's KubeCoder
-controller off prd's address, its token off the operator's leaf or handed to the migrations, or its
-CA file other than the homelab root mounted read-only; and on the pod's shutdown timing off the
-three values it is sized to.
+secret belongs, the site's annotations off the stage's host and reach (public or internal), and the
+backend's in-pod wiring (its drain) off the port and path the image uses. It fails too on a
+container running the retired SSE gateway: the backend serves the browser's stream itself, and on
+the links in text off the addresses the stage sets or set where values leave them out. It fails on
+the backend's STAGE off the stage, its KubeCoder controller off the stage's own, its token off the
+stage's leaf or handed to the migrations, or its CA file other than the homelab root mounted
+read-only; on the pod's shutdown timing off the three values it is sized to; and on a stage's values
+or render naming another stage's host, KubeCoder or leaves.
 
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
 
 import ast
 import base64
+import dataclasses
 import pathlib
 import re
 import subprocess
@@ -35,9 +38,68 @@ import yaml
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CHART = REPO / "chart"
-STAGE = "prd"
-# The Application's name and its destination namespace, one string (argo-cd D24).
-NAMESPACE = f"pilot-{STAGE}"
+# The front door's annotations on the Service in front of the UI (DockerImages
+# nginx-configurator).
+SERVER_NAME = "nginx.webathome.org/server-name"
+IS_PUBLIC = "nginx.webathome.org/is-public"
+ENABLE_SSL = "nginx.webathome.org/enable-ssl"
+# The prd cluster's OpenBao, where each stage on that cluster has its leaves under
+# eso/prd/pilot/<stage>/.
+STORE = {"name": "openbao-prd", "kind": "ClusterSecretStore"}
+
+
+@dataclasses.dataclass(frozen=True)
+class Stage:
+    name: str
+    # The site the Service carries and the backend's BASEURL names.
+    host: str
+    # A public site's front door serves it with a Let's Encrypt certificate whatever enable-ssl
+    # says, so it carries none. An internal one is served over HTTPS only with enable-ssl, from a
+    # homelab step-ca certificate.
+    public: bool
+    # The KubeCoder controller the backend's client calls and an environment link opens in.
+    kubecoder: str
+
+    @property
+    def namespace(self):
+        # The Application's name and its destination namespace, one string (argo-cd D24).
+        return f"pilot-{self.name}"
+
+    @property
+    def values(self):
+        return f"config/{self.name}/values.yaml"
+
+    @property
+    def tag_pin(self):
+        # `:<stage>-<n>`, the tag PilotApp's build pins, or a bare `:<n>`, which the registry
+        # holds for its older builds.
+        return re.compile(rf":(?:{re.escape(self.name)}-)?[0-9]+")
+
+    @property
+    def annotations(self):
+        if self.public:
+            return {SERVER_NAME: self.host, IS_PUBLIC: "true"}
+        return {SERVER_NAME: self.host, IS_PUBLIC: "false", ENABLE_SSL: "yes"}
+
+    @property
+    def leaves(self):
+        """The leaves the operator writes, each read by the backend's env var from the Secret an
+        ExternalSecret fills: {var: (Secret, leaf, property)}."""
+        oidc = f"eso/prd/pilot/{self.name}/oidc"
+        kubecoder = f"eso/prd/pilot/{self.name}/kubecoder"
+        return {
+            "OIDC_CLIENT_ID": ("pilot-oidc", oidc, "client_id"),
+            "OIDC_CLIENT_SECRET": ("pilot-oidc", oidc, "client_secret"),
+            "CONTROLLER_TOKEN": ("pilot-kubecoder", kubecoder, "token"),
+        }
+
+
+# Production, the public site on the operator's own KubeCoder, and dev, internal beside it on the
+# prd cluster with kubecoder-dev's fleet.
+STAGES = (
+    Stage("prd", host="pilot.ginbov.nl", public=True, kubecoder="https://kubecoder.home"),
+    Stage("dev", host="pilot-dev.home", public=False, kubecoder="https://kubecoder-dev.home"),
+)
 # The architecture producer's id is the chart's name plus `-deploy`.
 CHART_NAME = "pilot"
 # Exact (D17), from the chart repository Argo's repo-server resolves it from.
@@ -49,11 +111,9 @@ HOOK_REVISION = "0123456789abcdef0123456789abcdef01234567"
 # Where the library's Job template puts the hook (homelab-shared templates/_tf-presync-hook.tpl).
 HOOK_NAMESPACE = "argocd-hooks"
 HOOK_GUARD = "is required by the Terraform PreSync hook"
-# The image slots of config/prd/values.yaml, which PilotApp's build writes (cicd.writeVersionPins,
-# its Jenkinsfile's "Write image pins").
+# The image slots of config/<stage>/values.yaml, which PilotApp's build writes
+# (cicd.writeVersionPins, its Jenkinsfile's "Write image pins").
 PINS = ("images.pilot", "images.pilotUI")
-# A registry:5000 image's per-build tag, as the pin step writes it.
-TAG_PIN = re.compile(r":[0-9]+")
 # A key line as cicd.writeVersionPins matches it (JenkinsPipelineUtils vars/cicd.groovy, applyPins).
 KEY_LINE = re.compile(r" *([A-Za-z0-9_.\-]+): *(.*)")
 # The one cluster-scoped kind the chart renders, which the releases AppProject's
@@ -95,31 +155,21 @@ LOOPBACK = ("localhost", "127.0.0.1")
 # A URL in the preStop's Python, and an env var it reads.
 SCRIPT_URL = re.compile(r"http://[^\s\"']+")
 SCRIPT_ENV = re.compile(r"os\.environ\[[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']\]")
-# The public site: the front door's annotations on the Service in front of the UI (DockerImages
-# nginx-configurator). No enable-ssl: a public site is served over HTTPS regardless.
-PUBLIC_HOST = "pilot.ginbov.nl"
-PUBLIC_ANNOTATIONS = {
-    "nginx.webathome.org/server-name": PUBLIC_HOST,
-    "nginx.webathome.org/is-public": "true",
-}
 FRONT_DOOR = ("nginx.webathome.org/", "dns.webathome.org/")
-# The production stage and the internals fact (the copy-diagnostics button, a 500's exception
-# text), and the sign-in. No OIDC_AUDIENCE: the audience defaults to the client id, under whose
-# resource_access the backend's editor gate reads the role. No SSE gateway settings: the backend
-# serves the stream itself and reads neither (backend/app/config.py).
+# The internals fact (the copy-diagnostics button, a 500's exception text), and the sign-in, on the
+# one Keycloak realm both stages' clients live in. No OIDC_AUDIENCE: the audience defaults to the
+# client id, under whose resource_access the backend's editor gate reads the role. No SSE gateway
+# settings: the backend serves the stream itself and reads neither (backend/app/config.py).
 BACKEND_ENV = {
-    "STAGE": "prd",
     "HOMELAB_INTERNAL": "true",
-    "BASEURL": f"https://{PUBLIC_HOST}",
     "OIDC_ENABLED": "true",
     "OIDC_ISSUER_URL": "https://auth.ginbov.nl/realms/homelab",
 }
 ABSENT_ENV = ("OIDC_AUDIENCE", "SSE_GATEWAY_URL", "SSE_CALLBACK_SECRET")
-# KubeCoder's controller (PilotApp backend/app/app_config.py): prd's address, the token of Pilot's
-# named client credential, and CONTROLLER_CA_FILE, the homelab root the controller's certificate
-# chains to, which the image does not trust. The migrations never call the controller, so the
-# migrate init container sets none of the three.
-CONTROLLER_ENV = {"CONTROLLER_URL": "https://kubecoder.home"}
+# KubeCoder's controller (PilotApp backend/app/app_config.py): the stage's address, the token of
+# Pilot's named client credential there, and CONTROLLER_CA_FILE, the homelab root the controller's
+# certificate chains to, which the image does not trust. The migrations never call the controller,
+# so the migrate init container sets none of the three.
 CONTROLLER_VARS = ("CONTROLLER_URL", "CONTROLLER_TOKEN", "CONTROLLER_CA_FILE")
 CA_FILE_ENV = "CONTROLLER_CA_FILE"
 # The root's common name, which a self-signed certificate's DER carries twice: issuer and subject.
@@ -138,23 +188,12 @@ GRACE_SECONDS = 70
 SCRIPT_SLEEP = re.compile(r"time\.sleep\(([0-9]+)\)")
 SCRIPT_TIMEOUT = re.compile(r"timeout=([0-9]+)")
 # The links in text (PilotApp backend/app/app_config.py, F91, F93): a ticket's YouTrack issue,
-# `{id}` where the id goes, and KubeCoder, whose <base>/environments/<env-id>/ssh/open opens an
-# environment in VS Code. The values' `links` sets them; without it the backend has neither.
+# `{id}` where the id goes, and the stage's KubeCoder, whose <base>/environments/<env-id>/ssh/open
+# opens an environment in VS Code. The values' `links` sets them; without it the backend has
+# neither.
 LINK_VALUES = "links"
-LINK_ENV = {
-    "TICKET_URL_TEMPLATE": "https://issues.webathome.org/issue/{id}",
-    "ENVIRONMENT_LINK_BASE_URL": "https://kubecoder.home",
-}
-# The store ESO reads through, and the leaves the operator writes, each read by the backend's env
-# var from the Secret an ExternalSecret fills: {var: (Secret, leaf, property)}.
-STORE = {"name": "openbao-prd", "kind": "ClusterSecretStore"}
-OIDC_LEAF = f"eso/{STAGE}/pilot/{STAGE}/oidc"
-KUBECODER_LEAF = f"eso/{STAGE}/pilot/{STAGE}/kubecoder"
-LEAF_ENV = {
-    "OIDC_CLIENT_ID": ("pilot-oidc", OIDC_LEAF, "client_id"),
-    "OIDC_CLIENT_SECRET": ("pilot-oidc", OIDC_LEAF, "client_secret"),
-    "CONTROLLER_TOKEN": ("pilot-kubecoder", KUBECODER_LEAF, "token"),
-}
+TICKET_URL_TEMPLATE = "https://issues.webathome.org/issue/{id}"
+LINK_VARS = ("TICKET_URL_TEMPLATE", "ENVIRONMENT_LINK_BASE_URL")
 # The secrets ESO generates in the cluster, once each; a Password generator yields key `password`.
 GENERATED = {"pilot-secret-key", "pilot-drain-auth"}
 GENERATOR_KEY = "password"
@@ -178,31 +217,31 @@ def check(condition, message):
         failures.append(message)
 
 
-def hook_parameters():
+def hook_parameters(stage):
     # In the library's argument order: repo, revision, stage, namespace.
     return {
         "hook.repo": HOOK_REPO,
         "hook.revision": HOOK_REVISION,
-        "hook.stage": STAGE,
-        "hook.namespace": NAMESPACE,
+        "hook.stage": stage.name,
+        "hook.namespace": stage.namespace,
     }
 
 
-def template(parameters):
+def template(stage, parameters):
     args = [
-        "helm", "template", NAMESPACE, "chart",
-        "--namespace", NAMESPACE,
-        "--values", f"config/{STAGE}/values.yaml",
+        "helm", "template", stage.namespace, "chart",
+        "--namespace", stage.namespace,
+        "--values", stage.values,
     ]
     for name, value in parameters.items():
         args += ["--set", f"{name}={value}"]
     return subprocess.run(args, cwd=REPO, capture_output=True, text=True)
 
 
-def render():
-    result = template(hook_parameters())
+def render(stage):
+    result = template(stage, hook_parameters(stage))
     if result.returncode != 0:
-        sys.exit(f"helm template failed:\n{result.stderr}")
+        sys.exit(f"helm template of {stage.name} failed:\n{result.stderr}")
     return result.stdout
 
 
@@ -221,8 +260,8 @@ def label(doc):
     return f"{doc['kind']}/{doc['metadata'].get('name')}"
 
 
-def values_text():
-    return (REPO / "config" / STAGE / "values.yaml").read_text()
+def values_text(stage):
+    return (REPO / stage.values).read_text()
 
 
 def library_values():
@@ -297,57 +336,69 @@ def check_chart_values():
     check(
         "images" not in values,
         f"chart/values.yaml names images {values.get('images')}; the pins live in "
-        f"config/{STAGE}/values.yaml alone, with no chart default behind them",
+        "config/<stage>/values.yaml alone, with no chart default behind them",
     )
 
 
-def check_pin_slots():
-    paths = pin_paths(values_text())
-    images = yaml.safe_load(values_text()).get("images") or {}
+def check_stages():
+    found = sorted(path.name for path in (REPO / "config").iterdir() if path.is_dir())
+    check(
+        found == sorted(stage.name for stage in STAGES),
+        f"config/ holds the stages {found}, not the ones this gate renders "
+        f"{sorted(stage.name for stage in STAGES)}",
+    )
+
+
+def check_pin_slots(stage):
+    paths = pin_paths(values_text(stage))
+    images = yaml.safe_load(values_text(stage)).get("images") or {}
     for pin in PINS:
         lines = paths.get(pin, [])
         check(
             len(lines) == 1,
-            f"config/{STAGE}/values.yaml holds {pin} on lines {lines}, not on exactly one "
-            "block-style key line, which cicd.writeVersionPins edits in place and never creates",
+            f"{stage.values} holds {pin} on lines {lines}, not on exactly one block-style key "
+            "line, which cicd.writeVersionPins edits in place and never creates",
         )
         value = images.get(pin.removeprefix("images."))
         check(
-            isinstance(value, str) and TAG_PIN.fullmatch(value) is not None,
-            f"config/{STAGE}/values.yaml pins {pin} to {value!r}, not a tag suffix ':<build>'",
+            isinstance(value, str) and stage.tag_pin.fullmatch(value) is not None,
+            f"{stage.values} pins {pin} to {value!r}, not a tag suffix ':{stage.name}-<build>' "
+            "or ':<build>'",
         )
     stale = sorted(f"images.{name}" for name in images if f"images.{name}" not in PINS)
-    check(not stale, f"config/{STAGE}/values.yaml pins {stale}, beyond the pod's slots {list(PINS)}")
+    check(not stale, f"{stage.values} pins {stale}, beyond the pod's slots {list(PINS)}")
 
 
-def check_namespace_manifest(docs):
+def check_namespace_manifest(docs, stage):
+    namespace = stage.namespace
     names = [doc["metadata"]["name"] for doc in docs if doc["kind"] == "Namespace"]
-    check(names == [NAMESPACE], f"renders Namespaces {names}, not the one {NAMESPACE} (D25)")
-    manifest = find(docs, "Namespace", NAMESPACE)
+    check(names == [namespace], f"renders Namespaces {names}, not the one {namespace} (D25)")
+    manifest = find(docs, "Namespace", namespace)
     if manifest is None:
         return
     annotations = manifest["metadata"].get("annotations") or {}
     check(
         annotations.get("argocd.argoproj.io/sync-wave") == "-1",
-        f"Namespace/{NAMESPACE} is missing sync-wave -1 (D25)",
+        f"Namespace/{namespace} is missing sync-wave -1 (D25)",
     )
     check(
         annotations.get("argocd.argoproj.io/sync-options") == "Prune=false",
-        f"Namespace/{NAMESPACE} is missing sync-options Prune=false (D26)",
+        f"Namespace/{namespace} is missing sync-options Prune=false (D26)",
     )
 
 
-def check_hook(docs):
+def check_hook(docs, stage):
     jobs = [doc for doc in docs if doc["kind"] == "Job"]
     check(len(jobs) == 1, f"renders {len(jobs)} Jobs, not the one PreSync hook")
     if len(jobs) != 1:
         return
     metadata = jobs[0]["metadata"]
+    namespace = stage.namespace
     check(
-        metadata.get("name") == f"tf-presync-{NAMESPACE}"
+        metadata.get("name") == f"tf-presync-{namespace}"
         and metadata.get("namespace") == HOOK_NAMESPACE,
         f"the hook Job is {label(jobs[0])} in {metadata.get('namespace')}, "
-        f"not tf-presync-{NAMESPACE} in {HOOK_NAMESPACE}",
+        f"not tf-presync-{namespace} in {HOOK_NAMESPACE}",
     )
     check(
         (metadata.get("annotations") or {}).get("argocd.argoproj.io/hook") == "PreSync",
@@ -356,7 +407,7 @@ def check_hook(docs):
     containers = jobs[0]["spec"]["template"]["spec"]["containers"]
     # hook.path is unset: the repo's root is the app, so the Job passes exactly four arguments.
     args = [c.get("args") for c in containers]
-    expected = list(hook_parameters().values())
+    expected = list(hook_parameters(stage).values())
     check(args == [expected], f"the hook Job's args are {args}, not {expected}")
     image = f"registry:5000/argocd-hook:{library_values()['hook']['imageTag']}"
     check(
@@ -367,27 +418,27 @@ def check_hook(docs):
 
     binding = find(docs, "RoleBinding", "tf-presync")
     check(
-        binding is not None and binding["metadata"].get("namespace") == NAMESPACE,
-        f"no RoleBinding/tf-presync in {NAMESPACE}, the hook's grant there",
+        binding is not None and binding["metadata"].get("namespace") == namespace,
+        f"no RoleBinding/tf-presync in {namespace}, the hook's grant there",
     )
     revision = find(docs, "ConfigMap", "tf-presync-revision")
     check(
         revision is not None
-        and revision["metadata"].get("namespace") == NAMESPACE
+        and revision["metadata"].get("namespace") == namespace
         and revision["data"] == {"revision": HOOK_REVISION},
-        f"no ConfigMap/tf-presync-revision in {NAMESPACE} carrying the synced revision (D67)",
+        f"no ConfigMap/tf-presync-revision in {namespace} carrying the synced revision (D67)",
     )
 
-    for omitted in hook_parameters():
-        parameters = {k: v for k, v in hook_parameters().items() if k != omitted}
-        result = template(parameters)
+    for omitted in hook_parameters(stage):
+        parameters = {k: v for k, v in hook_parameters(stage).items() if k != omitted}
+        result = template(stage, parameters)
         check(
             result.returncode != 0 and f"{omitted} {HOOK_GUARD}" in result.stderr,
             f"rendering without {omitted} does not fail on the library's guard",
         )
 
 
-def check_scope(docs):
+def check_scope(docs, stage):
     for doc in docs:
         api_version = doc["apiVersion"]
         group_kind = (api_version.split("/")[0] if "/" in api_version else "", doc["kind"])
@@ -400,7 +451,7 @@ def check_scope(docs):
         )
         explicit = doc["metadata"].get("namespace")
         check(
-            explicit in (None, HOOK_NAMESPACE, NAMESPACE),
+            explicit in (None, HOOK_NAMESPACE, stage.namespace),
             f"{label(doc)} renders into {explicit}, outside the Application's destination",
         )
 
@@ -481,7 +532,20 @@ def container_port(container, port):
     return None
 
 
-def check_pod(docs):
+def backend_env(stage):
+    """The backend's env values the stage decides, beside those it shares with every stage."""
+    return {
+        **BACKEND_ENV,
+        "STAGE": stage.name,
+        "BASEURL": f"https://{stage.host}",
+        "TICKET_URL_TEMPLATE": TICKET_URL_TEMPLATE,
+        "ENVIRONMENT_LINK_BASE_URL": stage.kubecoder,
+        "CONTROLLER_URL": stage.kubecoder,
+        **SHUTDOWN_ENV,
+    }
+
+
+def check_pod(docs, stage):
     deployments = [doc for doc in docs if doc["kind"] == "Deployment"]
     check(
         [label(doc) for doc in deployments] == [f"Deployment/{DEPLOYMENT}"],
@@ -523,7 +587,7 @@ def check_pod(docs):
             f"{BACKEND_PORT}",
         )
     env = env_of(backend)
-    for name, value in {**BACKEND_ENV, **LINK_ENV, **CONTROLLER_ENV, **SHUTDOWN_ENV}.items():
+    for name, value in backend_env(stage).items():
         entry = env.get(name, (None, {}))[1]
         check(
             entry.get("value") == value,
@@ -658,12 +722,14 @@ def check_no_gateway(docs):
             )
 
 
-def check_images():
+def check_images(stage):
     """Each container runs its own pin's image. The two app pins hold one build number, so the
     stage's render cannot tell them apart; this one sets each pin to a tag of its own."""
     names = sorted({pin for _, pin in CONTAINER_IMAGES.values()})
     pins = {pin: f":{9001 + i}" for i, pin in enumerate(names)}
-    result = template({**hook_parameters(), **{f"images.{pin}": tag for pin, tag in pins.items()}})
+    result = template(
+        stage, {**hook_parameters(stage), **{f"images.{pin}": tag for pin, tag in pins.items()}}
+    )
     if result.returncode != 0:
         sys.exit(f"helm template with distinct pins failed:\n{result.stderr}")
     deployment = find(objects(result.stdout), "Deployment", DEPLOYMENT) or {}
@@ -675,15 +741,15 @@ def check_images():
         )
 
 
-def check_links_unset():
+def check_links_unset(stage):
     """Without the values' links, no container has a link setting: the text shows unlinked."""
-    result = template({**hook_parameters(), LINK_VALUES: "null"})
+    result = template(stage, {**hook_parameters(stage), LINK_VALUES: "null"})
     if result.returncode != 0:
         sys.exit(f"helm template without {LINK_VALUES} failed:\n{result.stderr}")
     deployment = find(objects(result.stdout), "Deployment", DEPLOYMENT)
     check(deployment is not None, f"without {LINK_VALUES} in values, no Deployment/{DEPLOYMENT}")
     for container in pod_containers(deployment) if deployment else []:
-        present = sorted(name for name in env_of(container) if name in LINK_ENV)
+        present = sorted(name for name in env_of(container) if name in LINK_VARS)
         check(
             not present,
             f"without {LINK_VALUES} in values, container {container['name']} sets {present}",
@@ -739,7 +805,7 @@ def check_shared_env(deployment):
             )
 
 
-def check_secret_refs(docs, deployment):
+def check_secret_refs(docs, deployment, stage):
     providers = secret_providers(docs)
     for secret, keys in providers.items():
         check(
@@ -755,19 +821,19 @@ def check_secret_refs(docs, deployment):
             check(
                 ref["key"] in (providers.get(ref["name"]) or ()),
                 f"container {container['name']}'s {entry['name']} reads key {ref['key']} of the "
-                f"Secret {ref['name']}, which nothing in {NAMESPACE} provides; the pod cannot "
-                "start",
+                f"Secret {ref['name']}, which nothing in {stage.namespace} provides; the pod "
+                "cannot start",
             )
         for source in container.get("envFrom") or []:
             secret = (source.get("secretRef") or {}).get("name")
             check(
                 secret is None or secret in providers,
                 f"container {container['name']} takes its env from the Secret {secret}, which "
-                f"nothing in {NAMESPACE} provides",
+                f"nothing in {stage.namespace} provides",
             )
 
 
-def check_external_secrets(docs, deployment):
+def check_external_secrets(docs, deployment, stage):
     secrets = [doc for doc in docs if doc["kind"] == "ExternalSecret"]
     for doc in secrets:
         if "secretStoreRef" in doc["spec"]:
@@ -777,7 +843,7 @@ def check_external_secrets(docs, deployment):
             )
 
     env = env_of(named(deployment, "backend"))
-    for var, (secret, leaf, prop) in LEAF_ENV.items():
+    for var, (secret, leaf, prop) in stage.leaves.items():
         ref = secret_ref(env.get(var, (None, {}))[1]) or {}
         check(
             ref.get("name") == secret,
@@ -841,7 +907,7 @@ def check_no_literal_secrets(docs, text):
     )
 
 
-def check_public_service(docs, deployment):
+def check_site_service(docs, deployment, stage):
     fronted = [
         doc for doc in docs if doc["kind"] == "Service"
         and any(key.startswith(FRONT_DOOR) for key in doc["metadata"].get("annotations") or {})
@@ -859,8 +925,8 @@ def check_public_service(docs, deployment):
         if key.startswith(FRONT_DOOR)
     }
     check(
-        annotations == PUBLIC_ANNOTATIONS,
-        f"Service/pilot's front-door annotations are {annotations}, not {PUBLIC_ANNOTATIONS}",
+        annotations == stage.annotations,
+        f"Service/pilot's front-door annotations are {annotations}, not {stage.annotations}",
     )
     labels = deployment["spec"]["template"]["metadata"].get("labels") or {}
     selector = service["spec"].get("selector") or {}
@@ -876,43 +942,74 @@ def check_public_service(docs, deployment):
     )
 
 
-def check_render_stable(first):
+def check_render_stable(stage, first):
     # `now` renders to the second, so a render more than a second later differs if any value
     # reads the clock; one reading randomness differs on any second render.
     time.sleep(1.1)
-    check(render() == first, "two renders of the same commit differ")
+    check(render(stage) == first, "two renders of the same commit differ")
+
+
+def stage_markers(stage):
+    """What names the stage alone: its host, its KubeCoder, its leaves."""
+    return {stage.host, stage.kubecoder, *(leaf for _, leaf, _ in stage.leaves.values())}
+
+
+def check_isolation(renders):
+    """No stage's values or render name another stage's host, KubeCoder or leaves: dev's sessions
+    are never the operator's own fleet's, and production never reads dev's client."""
+    for stage in STAGES:
+        texts = {stage.values: values_text(stage), "its render": renders[stage.name]}
+        for other in STAGES:
+            if other is stage:
+                continue
+            for where, text in texts.items():
+                named = sorted(marker for marker in stage_markers(other) if marker in text)
+                check(not named, f"{stage.name}: {where} names {other.name}'s {named}")
+
+
+def check_stage(stage):
+    check_pin_slots(stage)
+    first = render(stage)
+    docs = objects(first)
+    check_namespace_manifest(docs, stage)
+    check_hook(docs, stage)
+    check_scope(docs, stage)
+    check_no_literal_secrets(docs, first)
+    deployment = check_pod(docs, stage)
+    check_no_gateway(docs)
+    check_images(stage)
+    check_links_unset(stage)
+    if deployment is not None:
+        check_env(deployment)
+        check_shared_env(deployment)
+        check_secret_refs(docs, deployment, stage)
+        check_external_secrets(docs, deployment, stage)
+        check_site_service(docs, deployment, stage)
+        check_wiring(deployment)
+        check_timing(deployment)
+        check_controller(docs, deployment)
+    check_render_stable(stage, first)
+    return first, len(docs)
 
 
 def main():
     check_library()
     check_chart_values()
-    check_pin_slots()
-    first = render()
-    docs = objects(first)
-    check_namespace_manifest(docs)
-    check_hook(docs)
-    check_scope(docs)
-    check_no_literal_secrets(docs, first)
-    deployment = check_pod(docs)
-    check_no_gateway(docs)
-    check_images()
-    check_links_unset()
-    if deployment is not None:
-        check_env(deployment)
-        check_shared_env(deployment)
-        check_secret_refs(docs, deployment)
-        check_external_secrets(docs, deployment)
-        check_public_service(docs, deployment)
-        check_wiring(deployment)
-        check_timing(deployment)
-        check_controller(docs, deployment)
-    check_render_stable(first)
+    check_stages()
+    renders = {}
+    counts = {}
+    for stage in STAGES:
+        start = len(failures)
+        renders[stage.name], counts[stage.name] = check_stage(stage)
+        failures[start:] = [f"{stage.name}: {failure}" for failure in failures[start:]]
+    check_isolation(renders)
 
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         sys.exit(1)
-    print(f"ok: {STAGE} renders as Argo renders it ({len(docs)} objects)")
+    rendered = ", ".join(f"{name} ({count} objects)" for name, count in counts.items())
+    print(f"ok: {rendered} render as Argo renders them")
 
 
 main()

@@ -1,0 +1,65 @@
+# The dev stage's values for the pilot chart, as Argo CD's Application pilot-dev renders it: on the
+# prd cluster beside pilot-prd, on production's Keycloak realm and Postgres substrate, with its own
+# client, database and secrets, and with kubecoder-dev's controller, never the operator's own
+# fleet.
+
+# The backend's STAGE.
+stage: dev
+
+# The site, and the backend's BASEURL under it: the dev client (eso/prd/pilot/dev/oidc below)
+# registers https://pilot-dev.home/* as a valid redirect URI and https://pilot-dev.home as a web
+# origin. Internal: the front door serves it over HTTPS from a homelab step-ca certificate, and the
+# homelab DNS publishes the name (chart/templates/service.yaml).
+host: pilot-dev.home
+public: false
+
+# The existing public Keycloak's realm.
+oidc:
+  issuerUrl: https://auth.ginbov.nl/realms/homelab
+
+# The shared postgres-pas substrate's pooler, where terraform/'s database lives.
+db:
+  host: postgres-pooler-rw.postgres-pas-prd.svc.cluster.local
+
+# The links in text: a ticket id opens its YouTrack issue, {id} where the id goes, and an
+# environment opens in VS Code through kubecoder-dev, at <base>/environments/<env-id>/ssh/open.
+links:
+  ticketUrlTemplate: https://issues.webathome.org/issue/{id}
+  environmentLinkBaseUrl: https://kubecoder-dev.home
+
+# kubecoder-dev's controller, which the backend's client calls (CONTROLLER_URL): its sessions and
+# environments are that fleet's.
+controller:
+  url: https://kubecoder-dev.home
+
+# ESO wiring (homelab-shared.externalsecrets), from the dev stage's leaves on the prd cluster's
+# OpenBao: its own OIDC client's id and secret, and the token of Pilot's named client credential on
+# kubecoder-dev. The app's other secrets are generated in the cluster
+# (chart/templates/generated-secrets.yaml).
+externalSecrets:
+  storeRef:
+    name: openbao-prd
+  secrets:
+    oidc:
+      targetName: pilot-oidc
+      data:
+        - secretKey: client_id
+          path: eso/prd/pilot/dev/oidc
+          property: client_id
+        - secretKey: client_secret
+          path: eso/prd/pilot/dev/oidc
+          property: client_secret
+    kubecoder:
+      targetName: pilot-kubecoder
+      data:
+        - secretKey: token
+          path: eso/prd/pilot/dev/kubecoder
+          property: token
+
+images:
+  # The backend's and the UI's builds, registry:5000/pilot and registry:5000/pilot-ui. Every green
+  # PilotApp build pins both here as ":dev-<build number>", the tag it pushes, in one commit with
+  # config/prd's ":prd-<build number>" (cicd.writeVersionPins), editing these block-style lines in
+  # place; the pin step never creates a key.
+  pilot: ':31'
+  pilotUI: ':31'

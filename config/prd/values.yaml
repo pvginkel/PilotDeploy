@@ -1,8 +1,13 @@
 # The prd stage's values for the pilot chart, as Argo CD's Application pilot-prd renders it.
 
-# The public site, and the backend's BASEURL under it: Keycloak's client pilot-app registers
-# https://pilot.ginbov.nl/api/auth/callback as its redirect URI.
-publicHost: pilot.ginbov.nl
+# The backend's STAGE.
+stage: prd
+
+# The site, and the backend's BASEURL under it: Keycloak's client pilot-app registers
+# https://pilot.ginbov.nl/api/auth/callback as its redirect URI. Public: the front door serves it
+# with a Let's Encrypt certificate (chart/templates/service.yaml).
+host: pilot.ginbov.nl
+public: true
 
 # The existing public Keycloak's realm.
 oidc:
@@ -47,7 +52,10 @@ externalSecrets:
 
 images:
   # The backend's and the UI's builds, registry:5000/pilot and registry:5000/pilot-ui. Every green
-  # PilotApp build pins both here (cicd.writeVersionPins, ":<build number>"), editing these
-  # block-style lines in place; the pin step never creates a key.
+  # PilotApp build pins both here as ":prd-<build number>", in one commit with config/dev's
+  # ":dev-<build number>" (cicd.writeVersionPins), editing these block-style lines in place; the
+  # pin step never creates a key. The prd-<n> tags are the promotion's retag of dev-<n>, and
+  # pilot-prd runs a pin once the promotion has moved the prd branch it follows to a commit
+  # carrying it.
   pilot: ':31'
   pilotUI: ':31'
