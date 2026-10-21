@@ -3,9 +3,12 @@ sources:
   - architecture.yaml
   - chart/
   - config/prd/
+  - config/dev/
 instructions: >
-  Generated producer (id pilot-deploy). The artifact docs/architecture/pilot-deploy.yaml is a
-  build output: gitignored, produced by gen-architecture from the aac-tools image, which renders
-  chart/ with config/prd/values.yaml the way Argo CD renders it. The AaC/PilotDeploy Jenkins job
-  runs it. Edit only the judgment layer, architecture.yaml at the repo root, whose schema is what
-  gen-architecture --help prints from the aac-tools toolchain.
+  Generated producers, a stage each: pilot-deploy (prd) and pilot-dev-deploy (dev). The artifacts
+  docs/architecture/pilot-deploy.yaml and docs/architecture/pilot-dev-deploy.yaml are build
+  outputs: gitignored, produced by gen-architecture from the aac-tools image, which renders chart/
+  with config/<stage>/values.yaml the way Argo CD renders it. The AaC/PilotDeploy Jenkins job runs
+  it for prd from the prd branch, AaC/PilotDeployDev for dev from main. Edit only the judgment
+  layer, architecture.yaml at the repo root, whose schema is what gen-architecture --help prints
+  from the aac-tools toolchain.

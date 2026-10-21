@@ -1,5 +1,6 @@
 apiVersion: v2
-# The architecture producer's id is this name plus `-deploy`: pilot-deploy.
+# The architecture producers' ids are this name plus `-deploy` and `-dev-deploy`, a stage each:
+# pilot-deploy and pilot-dev-deploy.
 name: pilot
 version: "0.1"
 type: application

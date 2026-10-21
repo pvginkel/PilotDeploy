@@ -7,7 +7,8 @@ projects:
       Pilot's deploy repo: the `pilot` Helm chart on the homelab-shared library dependency, the
       dev and prd configurations Argo CD syncs it from, the Terraform its PreSync hook applies,
       the promotion job `PilotApp/Promote-PRD` (`Jenkinsfile.promote`), and the judgment layer of
-      the `pilot-deploy` architecture producer, which publishes prd from the `prd` branch. Argo
+      the architecture producers `pilot-deploy`, which publishes prd from the `prd` branch, and
+      `pilot-dev-deploy`, which publishes dev from `main`. Argo
       CD deploys `pilot-dev` from `main`, where every green PilotApp build pins its images, and
       `pilot-prd` from `prd`, which only the promotion job moves: started by hand, it retags the
       images a commit on `main` pins from `dev-<n>` to `prd-<n>`, fast-forwards `prd` to it and
@@ -27,22 +28,30 @@ projects:
       - cexec iac terraform fmt -check -diff -recursive
     # tests/render-chart.py renders each stage as its Application pilot-<stage> does and asserts
     # on the objects; tf-check checks terraform/ and tests/terraform-test.py plans each stage's
-    # tfvars against mocked providers. The architecture is prd's alone.
+    # tfvars against mocked providers. Then each stage's architecture.
     test:
       - cexec aac-tools chart-deps
       - cexec iac tests/render-chart.py
       - cexec iac tf-check
       - cexec iac tests/terraform-test.py
-      # The architecture, generated twice. First with PilotApp's model beside this checkout
-      # overlaid, so the app's products and its backend's recipes resolve published or not; then
-      # against the published dataset alone, as AaC/PilotDeploy generates it. A product or recipe
-      # that resolves nowhere is a gap and gen-architecture exits 0, so tests/architecture-test.py
-      # is what fails.
+      # Each stage's architecture, generated twice. First with PilotApp's model beside this
+      # checkout overlaid, so the app's products and its backend's recipes resolve published or
+      # not; then against the published dataset alone, as AaC/PilotDeploy (prd) and
+      # AaC/PilotDeployDev (dev) generate it. A product or recipe that resolves nowhere is a gap
+      # and gen-architecture exits 0, so tests/architecture-test.py is what fails.
       - >-
         ARCH_DATASET_OVERLAY=../PilotApp/docs/architecture/architecture.yaml
         cexec aac-tools gen-architecture --stage prd --producer pilot-deploy
       - cexec aac-tools arch-validate docs/architecture/pilot-deploy.yaml
-      - cexec iac tests/architecture-test.py --resolved
+      - cexec iac tests/architecture-test.py --stage prd --resolved
       - cexec aac-tools gen-architecture --stage prd --producer pilot-deploy
       - cexec aac-tools arch-validate docs/architecture/pilot-deploy.yaml
-      - cexec iac tests/architecture-test.py
+      - cexec iac tests/architecture-test.py --stage prd
+      - >-
+        ARCH_DATASET_OVERLAY=../PilotApp/docs/architecture/architecture.yaml
+        cexec aac-tools gen-architecture --stage dev --producer pilot-dev-deploy
+      - cexec aac-tools arch-validate docs/architecture/pilot-dev-deploy.yaml
+      - cexec iac tests/architecture-test.py --stage dev --resolved
+      - cexec aac-tools gen-architecture --stage dev --producer pilot-dev-deploy
+      - cexec aac-tools arch-validate docs/architecture/pilot-dev-deploy.yaml
+      - cexec iac tests/architecture-test.py --stage dev

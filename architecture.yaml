@@ -19,6 +19,8 @@ images:
 exposures:
   pilot: ui
 
-# The operator's UI, the one host the Service carries.
+# The operator's UI, every stage: the host each stage's Service carries, pilot.ginbov.nl prd's and
+# pilot-dev.home dev's. A stage renders only its own host, so each producer marks only its own.
 webUi:
   - pilot.ginbov.nl
+  - pilot-dev.home

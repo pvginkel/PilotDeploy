@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""The gate: the architecture artifact of prd carries what the judgment layer decides.
+"""The gate: a stage's architecture artifact carries what the judgment layer decides.
 
-Run after `cexec aac-tools gen-architecture --stage prd --producer pilot-deploy`, in one of two
-modes:
+Run with `--stage <stage>` after `cexec aac-tools gen-architecture` of that stage: prd as producer
+pilot-deploy, dev as pilot-dev-deploy. In one of two modes:
 
-- plain, after a run against the published dataset, as AaC/PilotDeploy generates: whether or not
-  the `pilot-app` producer is published, the three containers are the pod's instances and
-  pilot.ginbov.nl is the one exposed host, a web UI, on the UI's service;
+- plain, after a run against the published dataset, as AaC/PilotDeploy and AaC/PilotDeployDev
+  generate: whether or not the `pilot-app` producer is published, the three containers are the
+  pod's instances and the stage's host is the one exposed host, a web UI, on the UI's service;
 - `--resolved`, after a run with PilotApp's model overlaid (ARCH_DATASET_OVERLAY): every mapping
   resolves, the host is on the UI's service, and the backend is Served by the database pooler and
   Keycloak, the migrations by the pooler.
@@ -22,10 +22,12 @@ import sys
 import yaml
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-PRODUCER = "pilot-deploy"
-ARTIFACT = REPO / "docs" / "architecture" / f"{PRODUCER}.yaml"
+# Stage → its producer and the host config/<stage>/values.yaml exposes.
+STAGES = {
+    "prd": ("pilot-deploy", "pilot.ginbov.nl"),
+    "dev": ("pilot-dev-deploy", "pilot-dev.home"),
+}
 WORKLOAD = "pilot"
-PUBLIC_HOST = "pilot.ginbov.nl"
 # Container → the product its instance specializes. app:* of pilot are the `pilot-app` producer's.
 PRODUCTS = {
     "migrate": "app:pilot",
@@ -34,8 +36,8 @@ PRODUCTS = {
 }
 # The UI's service, the `pilot-app` producer's.
 UI_SERVICE = "svc:pilot-ui-web"
-# The providers config/prd/values.yaml points the backend at: db.host's pooler and the Service
-# behind auth.ginbov.nl, as the published dataset names their instances.
+# The providers both stages' values point the backend at: db.host's pooler and the Service behind
+# auth.ginbov.nl, as the published dataset names their instances.
 POOLER = "ss:postgres-pas-prd-postgres-pooler-rw"
 KEYCLOAK = "ss:keycloak-prd-keycloak-keycloak"
 
@@ -56,10 +58,11 @@ def resolved(element_id):
     return "," in element_id
 
 
-def load():
-    if not ARTIFACT.is_file():
-        sys.exit(f"{ARTIFACT.relative_to(REPO)} is missing: run gen-architecture first")
-    return yaml.safe_load(ARTIFACT.read_text())
+def load(producer):
+    artifact = REPO / "docs" / "architecture" / f"{producer}.yaml"
+    if not artifact.is_file():
+        sys.exit(f"{artifact.relative_to(REPO)} is missing: run gen-architecture first")
+    return yaml.safe_load(artifact.read_text())
 
 
 def elements(doc):
@@ -89,8 +92,8 @@ def instances(doc):
     return by_container
 
 
-def check_products(doc, inst, must_resolve):
-    check(doc.get("producer") == PRODUCER, f"the artifact's producer is {doc.get('producer')}, not {PRODUCER}")
+def check_products(doc, inst, producer, must_resolve):
+    check(doc.get("producer") == producer, f"the artifact's producer is {doc.get('producer')}, not {producer}")
     check(
         set(inst) == set(PRODUCTS),
         f"the artifact's instances are the containers {sorted(inst)}, not {sorted(PRODUCTS)}",
@@ -110,32 +113,32 @@ def check_products(doc, inst, must_resolve):
             )
 
 
-def check_public_host(doc, inst, must_resolve):
+def check_public_host(doc, inst, host, must_resolve):
     exposed = [
         e
         for e in doc.get("applicationInterfaces") or []
         if not (e.get("stats") or {}).get("url", "").endswith(".svc")
     ]
     check(
-        [(e.get("stats") or {}).get("url") for e in exposed] == [PUBLIC_HOST],
-        f"the exposed hosts are {[(e.get('stats') or {}).get('url') for e in exposed]}, not [{PUBLIC_HOST}]",
+        [(e.get("stats") or {}).get("url") for e in exposed] == [host],
+        f"the exposed hosts are {[(e.get('stats') or {}).get('url') for e in exposed]}, not [{host}]",
     )
     for interface in exposed:
-        check(interface.get("webUi") is True, f"{PUBLIC_HOST} is not marked webUi")
+        check(interface.get("webUi") is True, f"{host} is not marked webUi")
         services = [r["target"] for r in relations(doc, "Assignment", source=interface["id"])]
-        check(len(services) == 1, f"{PUBLIC_HOST} is assigned to {services}, not one service")
+        check(len(services) == 1, f"{host} is assigned to {services}, not one service")
         for service in services:
             if must_resolve:
                 check(
                     bare(service) == UI_SERVICE and resolved(service),
-                    f"{PUBLIC_HOST} is assigned to {service}, not {UI_SERVICE}",
+                    f"{host} is assigned to {service}, not {UI_SERVICE}",
                 )
             elif bare(service) != UI_SERVICE:
                 # The UI's product unpublished: the service is minted here, the UI's alone.
                 realizers = [r["source"] for r in relations(doc, "Realization", target=service)]
                 check(
                     realizers == [inst.get("ui")],
-                    f"{PUBLIC_HOST}'s service {service} is realized by {realizers}, not the UI's instance",
+                    f"{host}'s service {service} is realized by {realizers}, not the UI's instance",
                 )
 
 
@@ -160,6 +163,7 @@ def check_served(doc, inst):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--stage", required=True, choices=sorted(STAGES), help="the stage generated")
     parser.add_argument(
         "--resolved",
         action="store_true",
@@ -167,10 +171,11 @@ def main():
     )
     args = parser.parse_args()
 
-    doc = load()
+    producer, host = STAGES[args.stage]
+    doc = load(producer)
     inst = instances(doc)
-    check_products(doc, inst, args.resolved)
-    check_public_host(doc, inst, args.resolved)
+    check_products(doc, inst, producer, args.resolved)
+    check_public_host(doc, inst, host, args.resolved)
     if args.resolved:
         check_served(doc, inst)
 
@@ -178,7 +183,7 @@ def main():
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         sys.exit(1)
-    print(f"ok: {PUBLIC_HOST} is the UI's{', and every mapping resolves' if args.resolved else ''}")
+    print(f"ok: {host} is the UI's{', and every mapping resolves' if args.resolved else ''}")
 
 
 main()

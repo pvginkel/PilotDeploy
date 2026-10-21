@@ -8,8 +8,9 @@
 //
 // One pipeline publishes one stage: the artifact is attached to the pipeline, so a pipeline
 // building two stages would make it flap. The stage is prd and the branch is prd, the one Argo CD
-// syncs pilot-prd from (pilot-dev tracks main). The dev stage is not published. The job builds
-// prd, so a change to this file on main runs once PilotApp/Promote-PRD fast-forwards prd to it.
+// syncs pilot-prd from (pilot-dev tracks main, and Jenkinsfile.architecture-dev publishes it). The
+// job builds prd, so a change to this file on main runs once PilotApp/Promote-PRD fast-forwards
+// prd to it.
 //
 // Controller config:
 //   - Job: AaC/PilotDeploy
