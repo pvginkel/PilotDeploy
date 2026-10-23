@@ -74,5 +74,5 @@ images:
   # PilotApp build pins both here as ":dev-<build number>", the tag it pushes, in one commit with
   # config/prd's ":prd-<build number>" (cicd.writeVersionPins), editing these block-style lines in
   # place; the pin step never creates a key.
-  pilot: ':dev-50'
-  pilotUI: ':dev-50'
+  pilot: ':dev-51'
+  pilotUI: ':dev-51'
