@@ -1,7 +1,8 @@
 // Pilot's promote job: moves a validated commit on main to prd, the branch Argo CD's pilot-prd
 // syncs from. Started by hand, it promotes main's tip unless `commit` names an earlier commit on
-// main. It retags the commit's prd images in registry:5000, fast-forwards prd to the commit, and
-// pushes an annotated release-<m> tag, <m> this job's build number.
+// main. It retags the commit's prd images in registry:5000, fast-forwards prd to the commit, moves
+// registry:5000/pilot-sync:prd-latest to the commit's pilot-sync, and pushes an annotated
+// release-<m> tag, <m> this job's build number.
 //
 // The order, each step run only once the one before it succeeded, so prd never names a prd-<n>
 // tag that does not exist:
@@ -9,15 +10,18 @@
 //      pilot-sync, which no values file pins, of the same build <n>, get the tag prd-<n>,
 //      retagged from PilotApp/Build-Main's dev-<n>;
 //   2. prd fast-forwards to the commit;
-//   3. the release-<m> tag goes on the commit.
+//   3. pilot-sync's prd-latest moves to its prd-<n>, so it names the sidecar of the build prd
+//      runs, a rollback's older build included: production's store environment runs
+//      pilot-sync:prd-latest (KubeCoderDeploy's catalog entry) and pulls it at its next start;
+//   4. the release-<m> tag goes on the commit.
 //
-// A re-run for the commit prd already names finishes a promotion whose step 3 failed: when no
-// release-* tag points at the commit, the job runs step 3 alone. A commit a release tag records
-// has nothing left to promote: the run succeeds and skips all three steps. A run with `commit`
-// empty refuses while no release tag records prd's tip, and names it, so a bare re-run cannot
-// pass over a stuck release. The one unrecorded tip it admits is the commit prd was created at by
-// hand before the first promotion: no promotion made it, and its config/prd pins no prd-<n> tag,
-// where every commit this job moves prd to pins them.
+// A re-run for the commit prd already names finishes a promotion whose step 3 or 4 failed: when
+// no release-* tag points at the commit, the job runs steps 3 and 4 alone. A commit a release tag
+// records has nothing left to promote: the run succeeds and skips all four steps. A run with
+// `commit` empty refuses while no release tag records prd's tip, and names it, so a bare re-run
+// cannot pass over a stuck release. The one unrecorded tip it admits is the commit prd was created
+// at by hand before the first promotion: no promotion made it, and its config/prd pins no prd-<n>
+// tag, where every commit this job moves prd to pins them.
 //
 // No rollback parameter and no force-move: a rollback is a revert on main, promoted like any
 // other commit.
@@ -100,8 +104,8 @@ pipeline {
     }
 
     options {
-        // Without abortPrevious: an abort between the retag, the prd push and the tag push leaves
-        // the promotion half made.
+        // Without abortPrevious: an abort between the retag, the prd push, the prd-latest move and
+        // the tag push leaves the promotion half made.
         disableConcurrentBuilds()
         skipDefaultCheckout()
         timeout(time: 60, unit: 'MINUTES')
@@ -224,6 +228,30 @@ pipeline {
                 // follow pilot-prd's Argo CD sync, in the shape of cicd.writeVersionPins' pin line.
                 // Only this `pushed to` form moved prd and so brings a sync.
                 echo "pvginkel/PilotDeploy ${promoted} pushed to prd."
+            }
+        }
+
+        // After prd moved, so prd-latest never names a build prd does not run, and on a re-run
+        // that only records prd's tip too, which finishes a promotion that stopped here. The
+        // prd-<n> it names exists: the retag made it, or an earlier promotion did.
+        stage('Move pilot-sync prd-latest') {
+            when {
+                expression { !released }
+            }
+            steps {
+                container('k8s') {
+                    script {
+                        for (int i = 0; i < pins.size(); i++) {
+                            Map<String, String> pin = pins[i]
+                            if (pin.image == 'registry:5000/pilot-sync') {
+                                sh """
+                                    set -eu
+                                    crane --insecure tag '${pin.image}:${pin.tag}' prd-latest
+                                """
+                            }
+                        }
+                    }
+                }
             }
         }
 

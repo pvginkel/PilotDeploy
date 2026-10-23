@@ -163,6 +163,18 @@ spec:
                   key: token
             - name: CONTROLLER_CA_FILE
               value: {{ $homelabCA }}/homelab-root.crt
+            # The stage's store environment, whose pilot-sync sidecar alone the sync admits, and
+            # the bearer that sidecar presents. The bearer's Secret is optional: a backend started
+            # while it is absent runs with SYNC_TOKEN unset, which refuses every sync call, until
+            # its next start. The migrate init container sets neither.
+            - name: STORE_ENVIRONMENT_ID
+              value: {{ required "store.environmentId is not set" .Values.store.environmentId | quote }}
+            - name: SYNC_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecrets.secrets.sync.targetName }}
+                  key: token
+                  optional: true
             # The lifecycle coordinator's budget for its shutdown waiters. Every job stops within
             # seconds and the next pod resumes it from its rows; the backend's default of 600 s is
             # for tasks Pilot does not run.

@@ -17,8 +17,10 @@ container running the retired SSE gateway: the backend serves the browser's stre
 the links in text off the addresses the stage sets or set where values leave them out. It fails on
 the backend's STAGE off the stage, its KubeCoder controller off the stage's own, its token off the
 stage's leaf or handed to the migrations, or its CA file other than the homelab root mounted
-read-only; on the pod's shutdown timing off the three values it is sized to; and on a stage's values
-or render naming another stage's host, KubeCoder or leaves.
+read-only; on its store environment off the stage's own, or its sync bearer off the stage's leaf,
+read from a Secret the pod needs to start, or handed to the migrations; on the pod's shutdown
+timing off the three values it is sized to; and on a stage's values or render naming another
+stage's host, KubeCoder, store or leaves.
 
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
@@ -59,6 +61,8 @@ class Stage:
     public: bool
     # The KubeCoder controller the backend's client calls and an environment link opens in.
     kubecoder: str
+    # The store environment on that controller's fleet whose pilot-sync sidecar the sync admits.
+    store: str
 
     @property
     def namespace(self):
@@ -91,14 +95,27 @@ class Stage:
             "OIDC_CLIENT_ID": ("pilot-oidc", oidc, "client_id"),
             "OIDC_CLIENT_SECRET": ("pilot-oidc", oidc, "client_secret"),
             "CONTROLLER_TOKEN": ("pilot-kubecoder", kubecoder, "token"),
+            SYNC_TOKEN_ENV: ("pilot-sync", f"eso/prd/pilot/{self.name}/sync", "token"),
         }
 
 
 # Production, the public site on the operator's own KubeCoder, and dev, internal beside it on the
-# prd cluster with kubecoder-dev's fleet.
+# prd cluster with kubecoder-dev's fleet, each with its own store environment there.
 STAGES = (
-    Stage("prd", host="pilot.ginbov.nl", public=True, kubecoder="https://kubecoder.home"),
-    Stage("dev", host="pilot-dev.home", public=False, kubecoder="https://kubecoder-dev.home"),
+    Stage(
+        "prd",
+        host="pilot.ginbov.nl",
+        public=True,
+        kubecoder="https://kubecoder.home",
+        store="pvginkel-pilotprojects-8b0225",
+    ),
+    Stage(
+        "dev",
+        host="pilot-dev.home",
+        public=False,
+        kubecoder="https://kubecoder-dev.home",
+        store="pvginkel-pilotprojects-d75970",
+    ),
 )
 # The architecture producer's id is the chart's name plus `-deploy`.
 CHART_NAME = "pilot"
@@ -172,6 +189,11 @@ ABSENT_ENV = ("OIDC_AUDIENCE", "SSE_GATEWAY_URL", "SSE_CALLBACK_SECRET")
 # so the migrate init container sets none of the three.
 CONTROLLER_VARS = ("CONTROLLER_URL", "CONTROLLER_TOKEN", "CONTROLLER_CA_FILE")
 CA_FILE_ENV = "CONTROLLER_CA_FILE"
+# The store (PilotApp backend/app/app_config.py): STORE_ENVIRONMENT_ID, the one environment whose
+# pilot-sync sidecar the sync admits, and SYNC_TOKEN, the bearer that sidecar presents, which
+# refuses every sync call while unset. The migrations read neither.
+STORE_VARS = ("STORE_ENVIRONMENT_ID", "SYNC_TOKEN")
+SYNC_TOKEN_ENV = "SYNC_TOKEN"
 # The root's common name, which a self-signed certificate's DER carries twice: issuer and subject.
 HOMELAB_ROOT_CN = b"homelab-ca Root CA"
 PEM_CERTIFICATE = re.compile(
@@ -541,6 +563,7 @@ def backend_env(stage):
         "TICKET_URL_TEMPLATE": TICKET_URL_TEMPLATE,
         "ENVIRONMENT_LINK_BASE_URL": stage.kubecoder,
         "CONTROLLER_URL": stage.kubecoder,
+        "STORE_ENVIRONMENT_ID": stage.store,
         **SHUTDOWN_ENV,
     }
 
@@ -703,6 +726,52 @@ def check_controller(docs, deployment):
         f"the backend's {CA_FILE_ENV} {path} is key {key} of the ConfigMap {source.get('name')}, "
         f"which is not one PEM certificate issued by and to {HOMELAB_ROOT_CN.decode()}",
     )
+
+
+def check_store(docs, deployment, stage):
+    """A stage whose sync leaf is missing runs with the sync refused, never a pod that does not
+    start: every reference to the bearer's Secret is optional, and that Secret's ExternalSecret
+    reads the sync leaf alone, which no other ExternalSecret reads. The migrations get neither of
+    the store's settings."""
+    migrate = env_of(named(deployment, "migrate"))
+    present = sorted(name for name in migrate if name in STORE_VARS)
+    check(
+        not present,
+        f"the migrate init container sets {present}, which the migrations never read",
+    )
+
+    secret, leaf, _ = stage.leaves[SYNC_TOKEN_ENV]
+    for container in pod_containers(deployment):
+        refs = [
+            (entry["name"], secret_ref(entry)) for entry in container.get("env") or []
+            if secret_ref(entry)
+        ]
+        refs += [
+            ("envFrom", source["secretRef"]) for source in container.get("envFrom") or []
+            if "secretRef" in source
+        ]
+        for name, ref in refs:
+            check(
+                ref.get("name") != secret or ref.get("optional") is True,
+                f"container {container['name']}'s {name} reads the Secret {secret} without "
+                f"optional: true, so the pod does not start while {leaf} is missing",
+            )
+    for doc in docs:
+        if doc["kind"] != "ExternalSecret":
+            continue
+        spec = doc["spec"]
+        keys = {item["remoteRef"]["key"] for item in spec.get("data") or []}
+        if (spec.get("target") or {}).get("name") == secret:
+            check(
+                keys == {leaf} and not spec.get("dataFrom"),
+                f"{label(doc)} fills {secret} from {sorted(keys)}"
+                f"{' and a dataFrom' if spec.get('dataFrom') else ''}, not from {leaf} alone",
+            )
+        else:
+            check(
+                leaf not in keys,
+                f"{label(doc)} reads {leaf}, so it fails while that leaf is missing",
+            )
 
 
 def image_name(image):
@@ -950,13 +1019,19 @@ def check_render_stable(stage, first):
 
 
 def stage_markers(stage):
-    """What names the stage alone: its host, its KubeCoder, its leaves."""
-    return {stage.host, stage.kubecoder, *(leaf for _, leaf, _ in stage.leaves.values())}
+    """What names the stage alone: its host, its KubeCoder, its store, its leaves."""
+    return {
+        stage.host,
+        stage.kubecoder,
+        stage.store,
+        *(leaf for _, leaf, _ in stage.leaves.values()),
+    }
 
 
 def check_isolation(renders):
-    """No stage's values or render name another stage's host, KubeCoder or leaves: dev's sessions
-    are never the operator's own fleet's, and production never reads dev's client."""
+    """No stage's values or render name another stage's host, KubeCoder, store or leaves: dev's
+    sessions are never the operator's own fleet's, dev's sync never admits production's store, and
+    production never reads dev's client or bearer."""
     for stage in STAGES:
         texts = {stage.values: values_text(stage), "its render": renders[stage.name]}
         for other in STAGES:
@@ -988,6 +1063,7 @@ def check_stage(stage):
         check_wiring(deployment)
         check_timing(deployment)
         check_controller(docs, deployment)
+        check_store(docs, deployment, stage)
     check_render_stable(stage, first)
     return first, len(docs)
 

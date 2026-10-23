@@ -11,8 +11,15 @@ branch. Every green PilotApp build pins `:dev-<n>` into `config/dev/` and `:prd-
 `config/prd/` in one commit on `main`, so dev rolls to it and production waits for a promotion: the
 job `PilotApp/Promote-PRD` (`Jenkinsfile.promote`), started by hand, retags `pilot`, `pilot-ui` and
 `pilot-sync` from `dev-<n>` to `prd-<n>`, fast-forwards `prd` to a commit on `main`, its tip unless
-the run names another, and tags that commit `release-<m>`. A rollback is a revert on `main`,
+the run names another, moves `pilot-sync:prd-latest`, which production's store environment runs, to
+that build's sidecar, and tags that commit `release-<m>`. A rollback is a revert on `main`,
 promoted. prd's Terraform state owns the repository's webhook (`manage_webhook`), dev's none.
+
+**Each stage's store** is a KubeCoder environment on its fleet whose `pilot-sync` sidecar the
+backend admits: `store.environmentId` in `config/<stage>/values.yaml` sets `STORE_ENVIRONMENT_ID`,
+and the sidecar's bearer, `SYNC_TOKEN`, comes from the leaf `eso/prd/pilot/<stage>/sync`, property
+`token`. The bearer's Secret is optional: a backend started while it is absent refuses every sync
+call until its next start.
 
 **Rotation keepers** are the `rotation_epoch` map in each stage's `config/<stage>/rotation.tfvars`,
 which `terraform/main.tf` passes to the credentials it mints: `db` re-mints the Postgres role's

@@ -32,9 +32,14 @@ links:
 controller:
   url: https://kubecoder-dev.home
 
+# The stage's store environment on kubecoder-dev's fleet (STORE_ENVIRONMENT_ID), the one environment
+# whose pilot-sync sidecar the backend's sync admits.
+store:
+  environmentId: pvginkel-pilotprojects-d75970
+
 # ESO wiring (homelab-shared.externalsecrets), from the dev stage's leaves on the prd cluster's
-# OpenBao: its own OIDC client's id and secret, and the token of Pilot's named client credential on
-# kubecoder-dev. The app's other secrets are generated in the cluster
+# OpenBao: its own OIDC client's id and secret, the token of Pilot's named client credential on
+# kubecoder-dev, and its store's sync bearer. The app's other secrets are generated in the cluster
 # (chart/templates/generated-secrets.yaml).
 externalSecrets:
   storeRef:
@@ -54,6 +59,14 @@ externalSecrets:
       data:
         - secretKey: token
           path: eso/prd/pilot/dev/kubecoder
+          property: token
+    # The bearer the store's pilot-sync sidecar presents (SYNC_TOKEN), an ExternalSecret of its
+    # own: while the leaf is missing, only the sync is refused.
+    sync:
+      targetName: pilot-sync
+      data:
+        - secretKey: token
+          path: eso/prd/pilot/dev/sync
           property: token
 
 images:
