@@ -15,6 +15,13 @@ the run names another, moves `pilot-sync:prd-latest`, which production's store e
 that build's sidecar, and tags that commit `release-<m>`. A rollback is a revert on `main`,
 promoted. prd's Terraform state owns the repository's webhook (`manage_webhook`), dev's none.
 
+**The pod** runs the backend, Pilot's MCP server and the UI's nginx. The MCP server is the backend
+image's second entry point (`python -m pilot_mcp`), the container `mcp`, calling the backend over
+the pod's loopback, behind a Service of its own, `pilot-mcp`, at the stage's `mcp.host` in
+`config/<stage>/values.yaml`: `pilot-dev-mcp.home` or `pilot-mcp.home`, intranet only on both
+stages, since the session's bearer is its whole authentication. The backend hands every session it
+creates `https://<mcp.host>/mcp` (`MCP_SERVER_URL`).
+
 **Each stage's store** is a KubeCoder environment on its fleet whose `pilot-sync` sidecar the
 backend admits: `store.environmentId` in `config/<stage>/values.yaml` sets `STORE_ENVIRONMENT_ID`,
 and the sidecar's bearer, `SYNC_TOKEN`, comes from the leaf `eso/prd/pilot/<stage>/sync`, property
