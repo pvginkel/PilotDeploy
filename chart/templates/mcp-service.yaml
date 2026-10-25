@@ -1,0 +1,24 @@
+{{- /*
+Pilot's MCP server at https://<mcp.host>/mcp, proxied to port 80, the pod's mcp container: the
+endpoint every session Pilot creates is handed (the backend's MCP_SERVER_URL). Intranet only, on
+both stages: the session's bearer is the whole of its authentication. The front door serves it over
+HTTPS from a homelab step-ca certificate, and the homelab DNS publishes its .home name.
+*/}}
+{{- $mcpHost := required "mcp.host is not set" .Values.mcp.host }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: pilot-mcp
+  annotations:
+    nginx.webathome.org/server-name: {{ $mcpHost }}
+    nginx.webathome.org/is-public: "false"
+    nginx.webathome.org/enable-ssl: "yes"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pilot
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: mcp

@@ -1,7 +1,9 @@
 {{- /*
-Pilot: the Flask backend and the UI's nginx in one pod, reaching each other over loopback. The
-UI's nginx is the pod's front: it serves the SPA and proxies /api/ to the backend, the browser's
-SSE stream (/api/sse/stream) included (PilotApp frontend/nginx.conf).
+Pilot: the Flask backend, its MCP server and the UI's nginx in one pod, reaching each other over
+loopback. The UI's nginx is the site's front: it serves the SPA and proxies /api/ to the backend,
+the browser's SSE stream (/api/sse/stream) included (PilotApp frontend/nginx.conf). The MCP server
+is the front of its own Service (chart/templates/mcp-service.yaml), and calls the backend's
+/tools/ routes, which the UI's nginx never proxies.
 */}}
 {{- /* Seconds every container of a terminating pod goes on serving: the Service drops the pod from
 its endpoints asynchronously, and traffic reaches it until it has. */}}
@@ -15,6 +17,7 @@ its endpoints asynchronously, and traffic reaches it until it has. */}}
 {{- $database := "pilot-db" }}
 {{- $dbHost := required "db.host is not set" .Values.db.host }}
 {{- $stage := required "stage is not set" .Values.stage }}
+{{- $mcpHost := required "mcp.host is not set" .Values.mcp.host }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -175,6 +178,12 @@ spec:
                   name: {{ .Values.externalSecrets.secrets.sync.targetName }}
                   key: token
                   optional: true
+            # Pilot's MCP server, the mcp container below, at the address a session reaches it on
+            # (chart/templates/mcp-service.yaml): every session Pilot creates is handed it. The
+            # server refuses to start in production without it; the migrate init container sets
+            # none: the migrating CLI never makes that check.
+            - name: MCP_SERVER_URL
+              value: https://{{ $mcpHost }}/mcp
             # The lifecycle coordinator's budget for its shutdown waiters. Every job stops within
             # seconds and the next pod resumes it from its rows; the backend's default of 600 s is
             # for tasks Pilot does not run.
@@ -210,6 +219,38 @@ spec:
             httpGet:
               path: /health/healthz
               port: api
+            initialDelaySeconds: 10
+            periodSeconds: 10
+        # Pilot's MCP server, the backend image's second entry point (PilotApp backend/pilot_mcp/),
+        # behind the Service pilot-mcp. Each of its tools is one call to the backend's /tools/
+        # routes over loopback under the calling session's bearer; it reads no database, no Secret
+        # and no FLASK_ENV. `args`, not `command`: the image's ENTRYPOINT is tini.
+        - name: mcp
+          image: registry:5000/pilot{{ .Values.images.pilot }}
+          args: ["python", "-m", "pilot_mcp"]
+          ports:
+            - name: mcp
+              containerPort: 3502
+          env:
+            - name: PILOT_MCP_API_URL
+              value: http://localhost:3501
+            - name: PILOT_MCP_PORT
+              value: "3502"
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $endpointsLeave }}
+          # Without a bearer, as the image's server answers them.
+          readinessProbe:
+            httpGet:
+              path: /health/readyz
+              port: mcp
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health/healthz
+              port: mcp
             initialDelaySeconds: 10
             periodSeconds: 10
         - name: ui

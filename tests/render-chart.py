@@ -12,15 +12,19 @@ Beyond the frame (the library, the pins, the namespace, the hook), it fails on w
 shows would keep the pod from starting or put a secret in the commit: an env var reading a Secret
 key nothing in the namespace provides, a `$(VAR)` the kubelet cannot resolve, a literal where a
 secret belongs, the site's annotations off the stage's host and reach (public or internal), and the
-backend's in-pod wiring (its drain) off the port and path the image uses. It fails too on a
+backend's in-pod wiring (its drain) off the port and path the image uses. It fails on the MCP
+server's container off the image's entry point, port and health routes, on its address of the API
+off the backend on loopback, on any other setting of it, a database's, a Secret's or FLASK_ENV;
+on its Service off the stage's MCP host or off the intranet; and on the backend's MCP_SERVER_URL
+off that host's /mcp or handed to the migrations. It fails too on a
 container running the retired SSE gateway: the backend serves the browser's stream itself, and on
 the links in text off the addresses the stage sets or set where values leave them out. It fails on
 the backend's STAGE off the stage, its KubeCoder controller off the stage's own, its token off the
 stage's leaf or handed to the migrations, or its CA file other than the homelab root mounted
 read-only; on its store environment off the stage's own, or its sync bearer off the stage's leaf,
 read from a Secret the pod needs to start, or handed to the migrations; on the pod's shutdown
-timing off the three values it is sized to; and on a stage's values or render naming another
-stage's host, KubeCoder, store or leaves.
+timing off the three values it is sized to, or a container's preStop wait off the backend's; and on
+a stage's values or render naming another stage's host, MCP host, KubeCoder, store or leaves.
 
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
@@ -55,6 +59,8 @@ class Stage:
     name: str
     # The site the Service carries and the backend's BASEURL names.
     host: str
+    # The MCP server's host, which its Service carries and the backend's MCP_SERVER_URL names.
+    mcp_host: str
     # A public site's front door serves it with a Let's Encrypt certificate whatever enable-ssl
     # says, so it carries none. An internal one is served over HTTPS only with enable-ssl, from a
     # homelab step-ca certificate.
@@ -86,6 +92,16 @@ class Stage:
         return {SERVER_NAME: self.host, IS_PUBLIC: "false", ENABLE_SSL: "yes"}
 
     @property
+    def mcp_annotations(self):
+        # Intranet only on every stage: the session's bearer is the whole of its authentication.
+        return {SERVER_NAME: self.mcp_host, IS_PUBLIC: "false", ENABLE_SSL: "yes"}
+
+    @property
+    def mcp_url(self):
+        # The endpoint every session the backend creates is handed (MCP_SERVER_URL).
+        return f"https://{self.mcp_host}{MCP_PATH}"
+
+    @property
     def leaves(self):
         """The leaves the operator writes, each read by the backend's env var from the Secret an
         ExternalSecret fills: {var: (Secret, leaf, property)}."""
@@ -105,6 +121,7 @@ STAGES = (
     Stage(
         "prd",
         host="pilot.ginbov.nl",
+        mcp_host="pilot-mcp.home",
         public=True,
         kubecoder="https://kubecoder.home",
         store="pvginkel-pilotprojects-8b0225",
@@ -112,6 +129,7 @@ STAGES = (
     Stage(
         "dev",
         host="pilot-dev.home",
+        mcp_host="pilot-dev-mcp.home",
         public=False,
         kubecoder="https://kubecoder-dev.home",
         store="pvginkel-pilotprojects-d75970",
@@ -152,6 +170,7 @@ DEPLOYMENT = "pilot"
 CONTAINER_IMAGES = {
     "migrate": ("registry:5000/pilot", "pilot"),
     "backend": ("registry:5000/pilot", "pilot"),
+    "mcp": ("registry:5000/pilot", "pilot"),
     "ui": ("registry:5000/pilot-ui", "pilotUI"),
 }
 # The SSE gateway's image, retired: the backend serves the browser's stream itself
@@ -165,6 +184,18 @@ BACKEND_PORT = 3501
 UI_PORT = 3500
 BACKEND_PROBES = {"readinessProbe": "/health/readyz", "livenessProbe": "/health/healthz"}
 MIGRATE_ARGS = ["python", "-m", "app.cli", "upgrade-db"]
+# PilotApp's MCP server (backend/pilot_mcp/): the image's second entry point, run as a module, its
+# port and its health routes, answered without a bearer (config.py, server.py), and its address of
+# the API, the backend on loopback. It reads no other setting. Its Service is the front door's to
+# proxy on port 80, the one it proxies without a target-port annotation, and the endpoint is /mcp.
+MCP_ARGS = ["python", "-m", "pilot_mcp"]
+MCP_PORT = 3502
+MCP_PROBES = {"readinessProbe": "/health/readyz", "livenessProbe": "/health/healthz"}
+MCP_ENV = {"PILOT_MCP_API_URL": f"http://localhost:{BACKEND_PORT}", "PILOT_MCP_PORT": str(MCP_PORT)}
+MCP_SERVICE = "pilot-mcp"
+MCP_SERVICE_PORT = 80
+MCP_PATH = "/mcp"
+MCP_SERVER_URL_ENV = "MCP_SERVER_URL"
 # The pod's in-pod wiring, over loopback: the backend's preStop drains through /health/drain
 # (backend/app/api/health.py) with a bearer from its own env.
 DRAIN_PATH = "/health/drain"
@@ -564,6 +595,7 @@ def backend_env(stage):
         "ENVIRONMENT_LINK_BASE_URL": stage.kubecoder,
         "CONTROLLER_URL": stage.kubecoder,
         "STORE_ENVIRONMENT_ID": stage.store,
+        MCP_SERVER_URL_ENV: stage.mcp_url,
         **SHUTDOWN_ENV,
     }
 
@@ -583,8 +615,8 @@ def check_pod(docs, stage):
         "containers": [c["name"] for c in spec["containers"]],
     }
     check(
-        names == {"initContainers": ["migrate"], "containers": ["backend", "ui"]},
-        f"the pod runs {names}, not the migrations before the backend and the UI",
+        names == {"initContainers": ["migrate"], "containers": ["backend", "mcp", "ui"]},
+        f"the pod runs {names}, not the migrations before the backend, its MCP server and the UI",
     )
     for name in CONTAINER_IMAGES:
         container = named(deployment, name)
@@ -619,6 +651,38 @@ def check_pod(docs, stage):
     for name in ABSENT_ENV:
         check(name not in env, f"the backend sets {name}")
     return deployment
+
+
+def check_mcp(deployment):
+    """The MCP server runs the image's second entry point on its port, answers its probes there,
+    and calls the backend on loopback; it is handed nothing else, and the migrations are not handed
+    its address."""
+    mcp = named(deployment, "mcp")
+    check(
+        "command" not in mcp and mcp.get("args") == MCP_ARGS,
+        f"the mcp container runs command {mcp.get('command')} args {mcp.get('args')}, not "
+        f"{MCP_ARGS} under the image's entrypoint",
+    )
+    for probe, path in MCP_PROBES.items():
+        get = (mcp.get(probe) or {}).get("httpGet") or {}
+        check(
+            get.get("path") == path and container_port(mcp, get.get("port")) == MCP_PORT,
+            f"the mcp container's {probe} reads {get.get('path')} on {get.get('port')}, not {path} "
+            f"on {MCP_PORT}",
+        )
+    env = {
+        name: entry.get("value") if set(entry) == {"name", "value"} else entry
+        for name, (_, entry) in env_of(mcp).items()
+    }
+    check(
+        env == MCP_ENV and not mcp.get("envFrom"),
+        f"the mcp container's env is {env}{' with an envFrom' if mcp.get('envFrom') else ''}, not "
+        f"{MCP_ENV} alone",
+    )
+    check(
+        MCP_SERVER_URL_ENV not in env_of(named(deployment, "migrate")),
+        f"the migrate init container sets {MCP_SERVER_URL_ENV}, which the migrations never read",
+    )
 
 
 def loopback(url, port, path):
@@ -682,6 +746,16 @@ def check_timing(deployment):
         f"the backend's preStop sleeps {sleeps} s and waits {DRAIN_TIMEOUT} s for its drain, "
         f"which the grace of {GRACE_SECONDS} s does not cover",
     )
+    # Every other container goes on serving as long as the backend waits for the endpoints.
+    for container in spec["containers"]:
+        if container["name"] == "backend":
+            continue
+        pre_stop = (container.get("lifecycle") or {}).get("preStop") or {}
+        check(
+            pre_stop == {"sleep": {"seconds": sleeps[0] if len(sleeps) == 1 else None}},
+            f"container {container['name']}'s preStop is {pre_stop}, not a sleep of the {sleeps} s "
+            "the backend's waits for the endpoints",
+        )
 
 
 def ca_certificate(text):
@@ -982,9 +1056,9 @@ def check_site_service(docs, deployment, stage):
         and any(key.startswith(FRONT_DOOR) for key in doc["metadata"].get("annotations") or {})
     ]
     check(
-        [label(doc) for doc in fronted] == ["Service/pilot"],
-        f"the front door's annotations are on {[label(doc) for doc in fronted]}, not on the one "
-        "Service/pilot",
+        sorted(label(doc) for doc in fronted) == ["Service/pilot", f"Service/{MCP_SERVICE}"],
+        f"the front door's annotations are on {[label(doc) for doc in fronted]}, not on "
+        f"Service/pilot and Service/{MCP_SERVICE} alone",
     )
     service = find(docs, "Service", "pilot")
     if service is None:
@@ -1011,6 +1085,39 @@ def check_site_service(docs, deployment, stage):
     )
 
 
+def check_mcp_service(docs, deployment, stage):
+    """The MCP server's Service carries the stage's MCP host, internal, and routes port 80 to the
+    mcp container's port."""
+    service = find(docs, "Service", MCP_SERVICE)
+    check(service is not None, f"no Service/{MCP_SERVICE}, the MCP server's")
+    if service is None:
+        return
+    annotations = {
+        key: value for key, value in (service["metadata"].get("annotations") or {}).items()
+        if key.startswith(FRONT_DOOR)
+    }
+    check(
+        annotations == stage.mcp_annotations,
+        f"Service/{MCP_SERVICE}'s front-door annotations are {annotations}, not "
+        f"{stage.mcp_annotations}",
+    )
+    labels = deployment["spec"]["template"]["metadata"].get("labels") or {}
+    selector = service["spec"].get("selector") or {}
+    check(
+        selector and selector.items() <= labels.items(),
+        f"Service/{MCP_SERVICE} selects {selector}, which the pod's labels {labels} do not match",
+    )
+    mcp = named(deployment, "mcp")
+    ports = [(port.get("port"), port.get("targetPort")) for port in service["spec"]["ports"]]
+    check(
+        len(ports) == 1
+        and ports[0][0] == MCP_SERVICE_PORT
+        and container_port(mcp, ports[0][1]) == MCP_PORT,
+        f"Service/{MCP_SERVICE} routes {ports}, not port {MCP_SERVICE_PORT} to the mcp container's "
+        f"{MCP_PORT}",
+    )
+
+
 def check_render_stable(stage, first):
     # `now` renders to the second, so a render more than a second later differs if any value
     # reads the clock; one reading randomness differs on any second render.
@@ -1019,9 +1126,10 @@ def check_render_stable(stage, first):
 
 
 def stage_markers(stage):
-    """What names the stage alone: its host, its KubeCoder, its store, its leaves."""
+    """What names the stage alone: its host, its MCP host, its KubeCoder, its store, its leaves."""
     return {
         stage.host,
+        stage.mcp_host,
         stage.kubecoder,
         stage.store,
         *(leaf for _, leaf, _ in stage.leaves.values()),
@@ -1029,9 +1137,9 @@ def stage_markers(stage):
 
 
 def check_isolation(renders):
-    """No stage's values or render name another stage's host, KubeCoder, store or leaves: dev's
-    sessions are never the operator's own fleet's, dev's sync never admits production's store, and
-    production never reads dev's client or bearer."""
+    """No stage's values or render name another stage's host, MCP host, KubeCoder, store or leaves:
+    dev's sessions are never the operator's own fleet's nor handed production's MCP server, dev's
+    sync never admits production's store, and production never reads dev's client or bearer."""
     for stage in STAGES:
         texts = {stage.values: values_text(stage), "its render": renders[stage.name]}
         for other in STAGES:
@@ -1060,6 +1168,8 @@ def check_stage(stage):
         check_secret_refs(docs, deployment, stage)
         check_external_secrets(docs, deployment, stage)
         check_site_service(docs, deployment, stage)
+        check_mcp_service(docs, deployment, stage)
+        check_mcp(deployment)
         check_wiring(deployment)
         check_timing(deployment)
         check_controller(docs, deployment)

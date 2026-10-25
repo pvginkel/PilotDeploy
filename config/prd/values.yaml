@@ -9,6 +9,12 @@ stage: prd
 host: pilot.ginbov.nl
 public: true
 
+# Pilot's MCP server, at https://<host>/mcp: the backend hands every session it creates that
+# address (MCP_SERVER_URL). Internal, whatever the site is: the front door serves it over HTTPS
+# from a homelab step-ca certificate (chart/templates/mcp-service.yaml).
+mcp:
+  host: pilot-mcp.home
+
 # The existing public Keycloak's realm.
 oidc:
   issuerUrl: https://auth.ginbov.nl/realms/homelab

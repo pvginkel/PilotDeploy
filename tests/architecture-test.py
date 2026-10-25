@@ -5,8 +5,9 @@ Run with `--stage <stage>` after `cexec aac-tools gen-architecture` of that stag
 pilot-deploy, dev as pilot-dev-deploy. In one of two modes:
 
 - plain, after a run against the published dataset, as AaC/PilotDeploy and AaC/PilotDeployDev
-  generate: whether or not the `pilot-app` producer is published, the three containers are the
-  pod's instances and the stage's host is the one exposed host, a web UI, on the UI's service;
+  generate: whether or not the `pilot-app` producer is published, the four containers are the
+  pod's instances, and the stage's host, a web UI on the UI's service, and its MCP host, the MCP
+  server's alone and no web UI, are the exposed hosts;
 - `--resolved`, after a run with PilotApp's model overlaid (ARCH_DATASET_OVERLAY): every mapping
   resolves, the host is on the UI's service, and the backend is Served by the database pooler and
   Keycloak, the migrations by the pooler.
@@ -22,16 +23,17 @@ import sys
 import yaml
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-# Stage → its producer and the host config/<stage>/values.yaml exposes.
+# Stage → its producer, and the site's host and the MCP server's config/<stage>/values.yaml expose.
 STAGES = {
-    "prd": ("pilot-deploy", "pilot.ginbov.nl"),
-    "dev": ("pilot-dev-deploy", "pilot-dev.home"),
+    "prd": ("pilot-deploy", "pilot.ginbov.nl", "pilot-mcp.home"),
+    "dev": ("pilot-dev-deploy", "pilot-dev.home", "pilot-dev-mcp.home"),
 }
 WORKLOAD = "pilot"
 # Container → the product its instance specializes. app:* of pilot are the `pilot-app` producer's.
 PRODUCTS = {
     "migrate": "app:pilot",
     "backend": "app:pilot",
+    "mcp": "app:pilot",
     "ui": "app:pilot-ui",
 }
 # The UI's service, the `pilot-app` producer's.
@@ -113,17 +115,21 @@ def check_products(doc, inst, producer, must_resolve):
             )
 
 
-def check_public_host(doc, inst, host, must_resolve):
-    exposed = [
+def exposed(doc):
+    return [
         e
         for e in doc.get("applicationInterfaces") or []
         if not (e.get("stats") or {}).get("url", "").endswith(".svc")
     ]
-    check(
-        [(e.get("stats") or {}).get("url") for e in exposed] == [host],
-        f"the exposed hosts are {[(e.get('stats') or {}).get('url') for e in exposed]}, not [{host}]",
-    )
-    for interface in exposed:
+
+
+def check_exposed_hosts(doc, host, mcp_host):
+    urls = [(e.get("stats") or {}).get("url") for e in exposed(doc)]
+    check(sorted(urls) == sorted([host, mcp_host]), f"the exposed hosts are {urls}, not [{host}, {mcp_host}]")
+
+
+def check_public_host(doc, inst, host, must_resolve):
+    for interface in [e for e in exposed(doc) if (e.get("stats") or {}).get("url") == host]:
         check(interface.get("webUi") is True, f"{host} is not marked webUi")
         services = [r["target"] for r in relations(doc, "Assignment", source=interface["id"])]
         check(len(services) == 1, f"{host} is assigned to {services}, not one service")
@@ -140,6 +146,25 @@ def check_public_host(doc, inst, host, must_resolve):
                     realizers == [inst.get("ui")],
                     f"{host}'s service {service} is realized by {realizers}, not the UI's instance",
                 )
+
+
+def check_mcp_host(doc, inst, mcp_host, must_resolve):
+    """The MCP server's host is a machine endpoint, no web UI, and reaches the mcp container
+    alone."""
+    for interface in [e for e in exposed(doc) if (e.get("stats") or {}).get("url") == mcp_host]:
+        check(interface.get("webUi") is not True, f"{mcp_host} is marked webUi, but no person opens it")
+        services = [r["target"] for r in relations(doc, "Assignment", source=interface["id"])]
+        check(
+            len(services) == 1 and bare(services[0]) != UI_SERVICE,
+            f"{mcp_host} is assigned to {services}, not one service other than the UI's",
+        )
+        if must_resolve:
+            check(all(resolved(s) for s in services), f"{mcp_host}'s service {services} resolves to no producer")
+        linked = [r["source"] for r in relations(doc, "Association", target=interface["id"])]
+        check(
+            linked == [inst.get("mcp")],
+            f"{mcp_host} is linked to {linked}, not the mcp container's instance alone",
+        )
 
 
 def check_served(doc, inst):
@@ -171,11 +196,13 @@ def main():
     )
     args = parser.parse_args()
 
-    producer, host = STAGES[args.stage]
+    producer, host, mcp_host = STAGES[args.stage]
     doc = load(producer)
     inst = instances(doc)
     check_products(doc, inst, producer, args.resolved)
+    check_exposed_hosts(doc, host, mcp_host)
     check_public_host(doc, inst, host, args.resolved)
+    check_mcp_host(doc, inst, mcp_host, args.resolved)
     if args.resolved:
         check_served(doc, inst)
 
@@ -183,7 +210,10 @@ def main():
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         sys.exit(1)
-    print(f"ok: {host} is the UI's{', and every mapping resolves' if args.resolved else ''}")
+    print(
+        f"ok: {host} is the UI's, {mcp_host} the MCP server's"
+        f"{', and every mapping resolves' if args.resolved else ''}"
+    )
 
 
 main()

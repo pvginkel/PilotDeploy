@@ -8,8 +8,8 @@ introduced: '2026-10-14'
 
 # Pilot's products, services and edges are the `pilot-app` producer's (pvginkel/PilotApp), so the
 # layer references its app:* products and the generator resolves them to that producer's UUIDs. The
-# backend's image runs both the `migrate` init container and the `backend` container; the UI is the
-# app's second image.
+# backend's image runs the `migrate` init container, the `backend` container and the MCP server's
+# `mcp` container; the UI is the app's second image.
 images:
   pilot: app:pilot
   pilot-ui: app:pilot-ui
@@ -20,7 +20,8 @@ exposures:
   pilot: ui
 
 # The operator's UI, every stage: the host each stage's Service carries, pilot.ginbov.nl prd's and
-# pilot-dev.home dev's. A stage renders only its own host, so each producer marks only its own.
+# pilot-dev.home dev's. A stage renders only its own host, so each producer marks only its own. The
+# MCP server's hosts, pilot-mcp.home and pilot-dev-mcp.home, are machine endpoints.
 webUi:
   - pilot.ginbov.nl
   - pilot-dev.home
