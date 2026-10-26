@@ -38,6 +38,14 @@ controller:
 store:
   environmentId: pvginkel-pilotprojects-8b0225
 
+# The brain's sessions, the chat's and every job's alike: their model (BRAIN_MODEL) and reasoning
+# effort (BRAIN_REASONING_EFFORT), and the seconds after its last turn at which an open project
+# chat closes (CHAT_CLOSE_TIMEOUT), the prompt cache's 55 minutes.
+brain:
+  model: opus
+  reasoningEffort: xhigh
+  chatCloseTimeout: 3300
+
 # ESO wiring (homelab-shared.externalsecrets), from the leaves the operator writes: the OIDC
 # client's id and secret, the token of Pilot's named KubeCoder client credential, and the store's
 # sync bearer. The app's other secrets are generated in the cluster

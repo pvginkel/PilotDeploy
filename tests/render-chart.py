@@ -22,9 +22,11 @@ the links in text off the addresses the stage sets or set where values leave the
 the backend's STAGE off the stage, its KubeCoder controller off the stage's own, its token off the
 stage's leaf or handed to the migrations, or its CA file other than the homelab root mounted
 read-only; on its store environment off the stage's own, or its sync bearer off the stage's leaf,
-read from a Secret the pod needs to start, or handed to the migrations; on the pod's shutdown
-timing off the three values it is sized to, or a container's preStop wait off the backend's; and on
-a stage's values or render naming another stage's host, MCP host, KubeCoder, store or leaves.
+read from a Secret the pod needs to start, or handed to the migrations; on the brain's model,
+reasoning effort and chat close timeout off the ones every stage runs, or handed to the
+migrations; on the pod's shutdown timing off the three values it is sized to, or a container's
+preStop wait off the backend's; and on a stage's values or render naming another stage's host,
+MCP host, KubeCoder, store or leaves.
 
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
@@ -225,6 +227,14 @@ CA_FILE_ENV = "CONTROLLER_CA_FILE"
 # refuses every sync call while unset. The migrations read neither.
 STORE_VARS = ("STORE_ENVIRONMENT_ID", "SYNC_TOKEN")
 SYNC_TOKEN_ENV = "SYNC_TOKEN"
+# The brain's sessions (PilotApp backend/app/app_config.py), the same on every stage: Opus at
+# xhigh for the chat and every job alike, and an open project chat closed 3300 s, the prompt
+# cache's 55 minutes, after its last turn. The migrations read none of the three.
+BRAIN_ENV = {
+    "BRAIN_MODEL": "opus",
+    "BRAIN_REASONING_EFFORT": "xhigh",
+    "CHAT_CLOSE_TIMEOUT": "3300",
+}
 # The root's common name, which a self-signed certificate's DER carries twice: issuer and subject.
 HOMELAB_ROOT_CN = b"homelab-ca Root CA"
 PEM_CERTIFICATE = re.compile(
@@ -596,6 +606,7 @@ def backend_env(stage):
         "CONTROLLER_URL": stage.kubecoder,
         "STORE_ENVIRONMENT_ID": stage.store,
         MCP_SERVER_URL_ENV: stage.mcp_url,
+        **BRAIN_ENV,
         **SHUTDOWN_ENV,
     }
 
@@ -650,6 +661,11 @@ def check_pod(docs, stage):
         )
     for name in ABSENT_ENV:
         check(name not in env, f"the backend sets {name}")
+    present = sorted(name for name in env_of(migrate) if name in BRAIN_ENV)
+    check(
+        not present,
+        f"the migrate init container sets {present}, which the migrations never read",
+    )
     return deployment
 
 

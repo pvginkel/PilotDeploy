@@ -178,6 +178,15 @@ spec:
                   name: {{ .Values.externalSecrets.secrets.sync.targetName }}
                   key: token
                   optional: true
+            # The brain's sessions, the chat's and every job's alike: their model and reasoning
+            # effort, and the seconds after its last turn at which an open project chat closes.
+            # The migrate init container sets none of the three.
+            - name: BRAIN_MODEL
+              value: {{ required "brain.model is not set" .Values.brain.model | quote }}
+            - name: BRAIN_REASONING_EFFORT
+              value: {{ required "brain.reasoningEffort is not set" .Values.brain.reasoningEffort | quote }}
+            - name: CHAT_CLOSE_TIMEOUT
+              value: {{ required "brain.chatCloseTimeout is not set" .Values.brain.chatCloseTimeout | quote }}
             # Pilot's MCP server, the mcp container below, at the address a session reaches it on
             # (chart/templates/mcp-service.yaml): every session Pilot creates is handed it. The
             # server refuses to start in production without it; the migrate init container sets
