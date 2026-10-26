@@ -8,5 +8,5 @@ dependencies:
   # Exact, not a range (D17): the helpers and the hook Job this chart renders move on a
   # deliberate commit, never on a re-resolve.
   - name: homelab-shared
-    version: "0.6.0"
+    version: "0.6.2"
     repository: https://charts.home

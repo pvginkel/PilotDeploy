@@ -138,7 +138,7 @@ STAGES = (
 # The architecture producer's id is the chart's name plus `-deploy`.
 CHART_NAME = "pilot"
 # Exact (D17), from the chart repository Argo's repo-server resolves it from.
-LIBRARY = {"name": "homelab-shared", "version": "0.6.0", "repository": "https://charts.home"}
+LIBRARY = {"name": "homelab-shared", "version": "0.6.2", "repository": "https://charts.home"}
 DEFINE = re.compile(r"\{\{-?\s*define\b")
 # The registry entry's `repo:` form, and a SHA of the shape `$ARGOCD_APP_REVISION` becomes.
 HOOK_REPO = "https://github.com/pvginkel/PilotDeploy.git"
