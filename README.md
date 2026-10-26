@@ -19,14 +19,18 @@ promoted. prd's Terraform state owns the repository's webhook (`manage_webhook`)
 image's second entry point (`python -m pilot_mcp`), the container `mcp`, calling the backend over
 the pod's loopback, behind a Service of its own, `pilot-mcp`, at the stage's `mcp.host` in
 `config/<stage>/values.yaml`: `pilot-dev-mcp.home` or `pilot-mcp.home`, intranet only on both
-stages, since the session's bearer is its whole authentication. The backend hands every session it
-creates `https://<mcp.host>/mcp` (`MCP_SERVER_URL`).
+stages, since the session's bearer is its whole authentication. The backend hands a work item's
+session `https://<mcp.host>/mcp` (`MCP_SERVER_URL`), and a brain session the brain's tools under
+it, `…/mcp/store`.
 
 **Each stage's store** is a KubeCoder environment on its fleet whose `pilot-sync` sidecar the
 backend admits: `store.environmentId` in `config/<stage>/values.yaml` sets `STORE_ENVIRONMENT_ID`,
 and the sidecar's bearer, `SYNC_TOKEN`, comes from the leaf `eso/prd/pilot/<stage>/sync`, property
 `token`. The bearer's Secret is optional: a backend started while it is absent refuses every sync
-call until its next start.
+call until its next start. The brain's sessions there run on `brain` in the same values: `model`,
+`reasoningEffort` and `chatCloseTimeout` set the backend's `BRAIN_MODEL`, `BRAIN_REASONING_EFFORT`
+and `CHAT_CLOSE_TIMEOUT`, each required, so that a stage without them fails its render, and
+`tests/render-chart.py` pins them on both stages' backend and their absence from `migrate`.
 
 **Rotation keepers** are the `rotation_epoch` map in each stage's `config/<stage>/rotation.tfvars`,
 which `terraform/main.tf` passes to the credentials it mints: `db` re-mints the Postgres role's
