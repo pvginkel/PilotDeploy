@@ -85,5 +85,5 @@ images:
   # pin step never creates a key. The prd-<n> tags are the promotion's retag of dev-<n>, and
   # pilot-prd runs a pin once the promotion has moved the prd branch it follows to a commit
   # carrying it.
-  pilot: ':prd-89'
-  pilotUI: ':prd-89'
+  pilot: ':prd-90'
+  pilotUI: ':prd-90'
