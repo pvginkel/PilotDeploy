@@ -32,6 +32,15 @@ call until its next start. The brain's sessions there run on `brain` in the same
 and `CHAT_CLOSE_TIMEOUT`, each required, so that a stage without them fails its render, and
 `tests/render-chart.py` pins them on both stages' backend and their absence from `migrate`.
 
+**The notification bridge** is `notificationBridge.url` in the same values, the backend's
+`NOTIFICATION_BRIDGE_URL`: `http://notification-bridge.notifications-prd.svc:8090` on both stages,
+the bridge's in-cluster Service on the prd cluster, through which the backend notifies each person
+under the token they paste on their profile. It is required, since a production backend refuses to
+start without it, so that a stage without it fails its render, and `migrate` gets none;
+`tests/render-chart.py` pins it on both stages' backend, its absence from `migrate`, and the render's
+failure without it. The people's registrations are made for production, and the dev stage has none
+of its own (`config/dev/values.yaml` says what a token saved there does).
+
 **Rotation keepers** are the `rotation_epoch` map in each stage's `config/<stage>/rotation.tfvars`,
 which `terraform/main.tf` passes to the credentials it mints: `db` re-mints the Postgres role's
 password. SecretRotator's `terraform` kind writes it, one commit `rotate <keeper> (secret-rotator)`
