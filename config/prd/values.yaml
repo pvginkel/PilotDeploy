@@ -46,6 +46,11 @@ brain:
   reasoningEffort: xhigh
   chatCloseTimeout: 3300
 
+# The notification bridge (NOTIFICATION_BRIDGE_URL), which the backend calls under each person's
+# own registration's token: its in-cluster Service on the prd cluster, which both stages run on.
+notificationBridge:
+  url: http://notification-bridge.notifications-prd.svc:8090
+
 # ESO wiring (homelab-shared.externalsecrets), from the leaves the operator writes: the OIDC
 # client's id and secret, the token of Pilot's named KubeCoder client credential, and the store's
 # sync bearer. The app's other secrets are generated in the cluster

@@ -193,6 +193,12 @@ spec:
             # none: the migrating CLI never makes that check.
             - name: MCP_SERVER_URL
               value: https://{{ $mcpHost }}/mcp
+            # The notification bridge, through which the backend notifies each person under the
+            # token they paste on the profile page. The server refuses to start in production
+            # without it; the migrate init container sets none: the migrating CLI never makes that
+            # check.
+            - name: NOTIFICATION_BRIDGE_URL
+              value: {{ required "notificationBridge.url is not set" .Values.notificationBridge.url | quote }}
             # The lifecycle coordinator's budget for its shutdown waiters. Every job stops within
             # seconds and the next pod resumes it from its rows; the backend's default of 600 s is
             # for tasks Pilot does not run.

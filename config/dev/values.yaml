@@ -51,6 +51,12 @@ brain:
   reasoningEffort: xhigh
   chatCloseTimeout: 3300
 
+# The notification bridge (NOTIFICATION_BRIDGE_URL), which the backend calls under each person's
+# own registration's token: its in-cluster Service on the prd cluster, which both stages run on.
+# Dev has no registration of its own, so the bridge refuses every token saved here.
+notificationBridge:
+  url: http://notification-bridge.notifications-prd.svc:8090
+
 # ESO wiring (homelab-shared.externalsecrets), from the dev stage's leaves on the prd cluster's
 # OpenBao: its own OIDC client's id and secret, the token of Pilot's named client credential on
 # kubecoder-dev, and its store's sync bearer. The app's other secrets are generated in the cluster

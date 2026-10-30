@@ -24,7 +24,8 @@ stage's leaf or handed to the migrations, or its CA file other than the homelab 
 read-only; on its store environment off the stage's own, or its sync bearer off the stage's leaf,
 read from a Secret the pod needs to start, or handed to the migrations; on the brain's model,
 reasoning effort and chat close timeout off the ones every stage runs, or handed to the
-migrations; on the pod's shutdown timing off the three values it is sized to, or a container's
+migrations; on the notification bridge off the in-cluster address every stage calls, handed to the
+migrations, or a stage's values without it rendering at all; on the pod's shutdown timing off the three values it is sized to, or a container's
 preStop wait off the backend's; and on a stage's values or render naming another stage's host,
 MCP host, KubeCoder, store or leaves.
 
@@ -234,6 +235,14 @@ BRAIN_ENV = {
     "BRAIN_MODEL": "opus",
     "BRAIN_REASONING_EFFORT": "xhigh",
     "CHAT_CLOSE_TIMEOUT": "3300",
+}
+# The notification bridge (PilotApp backend/app/app_config.py), the same on every stage: its
+# in-cluster Service on the prd cluster, which both stages run on (NotificationsDeploy, namespace
+# notifications-prd). A production backend refuses to start without it, so a stage's values
+# without it fail the render; the migrations never read it.
+BRIDGE_VALUES = "notificationBridge.url"
+NOTIFICATION_BRIDGE_ENV = {
+    "NOTIFICATION_BRIDGE_URL": "http://notification-bridge.notifications-prd.svc:8090",
 }
 # The root's common name, which a self-signed certificate's DER carries twice: issuer and subject.
 HOMELAB_ROOT_CN = b"homelab-ca Root CA"
@@ -607,6 +616,7 @@ def backend_env(stage):
         "STORE_ENVIRONMENT_ID": stage.store,
         MCP_SERVER_URL_ENV: stage.mcp_url,
         **BRAIN_ENV,
+        **NOTIFICATION_BRIDGE_ENV,
         **SHUTDOWN_ENV,
     }
 
@@ -661,7 +671,9 @@ def check_pod(docs, stage):
         )
     for name in ABSENT_ENV:
         check(name not in env, f"the backend sets {name}")
-    present = sorted(name for name in env_of(migrate) if name in BRAIN_ENV)
+    present = sorted(
+        name for name in env_of(migrate) if name in {**BRAIN_ENV, **NOTIFICATION_BRIDGE_ENV}
+    )
     check(
         not present,
         f"the migrate init container sets {present}, which the migrations never read",
@@ -913,6 +925,16 @@ def check_links_unset(stage):
             not present,
             f"without {LINK_VALUES} in values, container {container['name']} sets {present}",
         )
+
+
+def check_bridge_required(stage):
+    """Without the values' bridge, the render fails on it: the backend would not start."""
+    result = template(stage, {**hook_parameters(stage), BRIDGE_VALUES: "null"})
+    check(
+        result.returncode != 0 and f"{BRIDGE_VALUES} is not set" in result.stderr,
+        f"without {BRIDGE_VALUES} in values, the render does not fail on it: "
+        f"exit {result.returncode}, {result.stderr.strip()!r}",
+    )
 
 
 def check_env(deployment):
@@ -1178,6 +1200,7 @@ def check_stage(stage):
     check_no_gateway(docs)
     check_images(stage)
     check_links_unset(stage)
+    check_bridge_required(stage)
     if deployment is not None:
         check_env(deployment)
         check_shared_env(deployment)
