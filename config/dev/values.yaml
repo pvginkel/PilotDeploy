@@ -53,7 +53,10 @@ brain:
 
 # The notification bridge (NOTIFICATION_BRIDGE_URL), which the backend calls under each person's
 # own registration's token: its in-cluster Service on the prd cluster, which both stages run on.
-# Dev has no registration of its own, so the bridge refuses every token saved here.
+# Dev has no registration of its own, so a made-up token saved here is refused. The bridge knows a
+# registration by its token alone, not by the stage calling it: a person's real token saved here is
+# taken, and pilot-dev's notifications and alarms then reach their phone, the alarms under the same
+# sequence ids as production's.
 notificationBridge:
   url: http://notification-bridge.notifications-prd.svc:8090
 
