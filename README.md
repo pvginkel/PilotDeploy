@@ -41,6 +41,13 @@ start without it, so that a stage without it fails its render, and `migrate` get
 failure without it. The people's registrations are made for production, and the dev stage has none
 of its own (`config/dev/values.yaml` says what a token saved there does).
 
+**YouTrack's webhook token** is production's alone, since the dev stage gets no tracker events: an
+ExternalSecret fills the Secret `pilot-youtrack-webhook-token`, key `token`, from the leaf
+`eso/prd/pilot/prd/youtrack-webhook-token`, property `token`, a copy of the instance's shared
+webhook token that SecretRotator keeps. PilotApp's slice 027 compares it with each delivery's
+`X-YouTrack-Token` on its tracker-events endpoint and wires the backend's environment variable; until
+then nothing reads the Secret.
+
 **Rotation keepers** are the `rotation_epoch` map in each stage's `config/<stage>/rotation.tfvars`,
 which `terraform/main.tf` passes to the credentials it mints: `db` re-mints the Postgres role's
 password. SecretRotator's `terraform` kind writes it, one commit `rotate <keeper> (secret-rotator)`
