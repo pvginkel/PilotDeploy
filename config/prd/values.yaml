@@ -82,9 +82,9 @@ externalSecrets:
         - secretKey: token
           path: eso/prd/pilot/prd/sync
           property: token
-    # YouTrack's shared webhook token, a rotator-kept copy of the instance's: slice 027's
-    # tracker-events endpoint compares it with each delivery's X-YouTrack-Token. Production only,
-    # since the dev stage gets no tracker events; nothing reads the Secret until 027 wires it.
+    # YouTrack's shared webhook token, a rotator-kept copy of the instance's, the backend's
+    # YOUTRACK_WEBHOOK_TOKEN: the tracker-events endpoint compares it with each delivery's
+    # X-YouTrack-Token. Production only, since the dev stage gets no tracker events.
     youtrackWebhookToken:
       targetName: pilot-youtrack-webhook-token
       data:

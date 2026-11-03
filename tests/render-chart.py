@@ -22,7 +22,9 @@ the links in text off the addresses the stage sets or set where values leave the
 the backend's STAGE off the stage, its KubeCoder controller off the stage's own, its token off the
 stage's leaf or handed to the migrations, or its CA file other than the homelab root mounted
 read-only; on its store environment off the stage's own, or its sync bearer off the stage's leaf,
-read from a Secret the pod needs to start, or handed to the migrations; on the brain's model,
+read from a Secret the pod needs to start, or handed to the migrations; on YouTrack's webhook
+token off production's leaf, read from a Secret the pod needs to start, handed to the migrations,
+or set on a stage that gets no tracker events; on the brain's model,
 reasoning effort and chat close timeout off the ones every stage runs, or handed to the
 migrations; on the notification bridge off the in-cluster address every stage calls, handed to the
 migrations, or a stage's values without it rendering at all; on the pod's shutdown timing off the three values it is sized to, or a container's
@@ -72,6 +74,9 @@ class Stage:
     kubecoder: str
     # The store environment on that controller's fleet whose pilot-sync sidecar the sync admits.
     store: str
+    # Whether YouTrack posts its tracker events to the stage, and so its backend reads the
+    # webhook token.
+    tracker_events: bool
 
     @property
     def namespace(self):
@@ -110,16 +115,24 @@ class Stage:
         ExternalSecret fills: {var: (Secret, leaf, property)}."""
         oidc = f"eso/prd/pilot/{self.name}/oidc"
         kubecoder = f"eso/prd/pilot/{self.name}/kubecoder"
-        return {
+        leaves = {
             "OIDC_CLIENT_ID": ("pilot-oidc", oidc, "client_id"),
             "OIDC_CLIENT_SECRET": ("pilot-oidc", oidc, "client_secret"),
             "CONTROLLER_TOKEN": ("pilot-kubecoder", kubecoder, "token"),
             SYNC_TOKEN_ENV: ("pilot-sync", f"eso/prd/pilot/{self.name}/sync", "token"),
         }
+        if self.tracker_events:
+            leaves[YOUTRACK_WEBHOOK_TOKEN_ENV] = (
+                "pilot-youtrack-webhook-token",
+                f"eso/prd/pilot/{self.name}/youtrack-webhook-token",
+                "token",
+            )
+        return leaves
 
 
 # Production, the public site on the operator's own KubeCoder, and dev, internal beside it on the
-# prd cluster with kubecoder-dev's fleet, each with its own store environment there.
+# prd cluster with kubecoder-dev's fleet, each with its own store environment there. YouTrack posts
+# its tracker events to production alone (YouTrackConfiguration youtrack.yaml).
 STAGES = (
     Stage(
         "prd",
@@ -128,6 +141,7 @@ STAGES = (
         public=True,
         kubecoder="https://kubecoder.home",
         store="pvginkel-pilotprojects-8b0225",
+        tracker_events=True,
     ),
     Stage(
         "dev",
@@ -136,6 +150,7 @@ STAGES = (
         public=False,
         kubecoder="https://kubecoder-dev.home",
         store="pvginkel-pilotprojects-d75970",
+        tracker_events=False,
     ),
 )
 # The architecture producer's id is the chart's name plus `-deploy`.
@@ -228,6 +243,10 @@ CA_FILE_ENV = "CONTROLLER_CA_FILE"
 # refuses every sync call while unset. The migrations read neither.
 STORE_VARS = ("STORE_ENVIRONMENT_ID", "SYNC_TOKEN")
 SYNC_TOKEN_ENV = "SYNC_TOKEN"
+# YouTrack's webhook token (PilotApp backend/app/app_config.py), which the tracker-events endpoint
+# compares with each delivery's X-YouTrack-Token and which refuses every delivery while unset. The
+# migrations never read it.
+YOUTRACK_WEBHOOK_TOKEN_ENV = "YOUTRACK_WEBHOOK_TOKEN"
 # The brain's sessions (PilotApp backend/app/app_config.py), the same on every stage: Opus at
 # xhigh for the chat and every job alike, and an open project chat closed 3300 s, the prompt
 # cache's 55 minutes, after its last turn. The migrations read none of the three.
@@ -830,19 +849,10 @@ def check_controller(docs, deployment):
     )
 
 
-def check_store(docs, deployment, stage):
-    """A stage whose sync leaf is missing runs with the sync refused, never a pod that does not
-    start: every reference to the bearer's Secret is optional, and that Secret's ExternalSecret
-    reads the sync leaf alone, which no other ExternalSecret reads. The migrations get neither of
-    the store's settings."""
-    migrate = env_of(named(deployment, "migrate"))
-    present = sorted(name for name in migrate if name in STORE_VARS)
-    check(
-        not present,
-        f"the migrate init container sets {present}, which the migrations never read",
-    )
-
-    secret, leaf, _ = stage.leaves[SYNC_TOKEN_ENV]
+def check_optional_secret(docs, deployment, secret, leaf):
+    """A stage whose leaf is missing runs without the one setting the leaf holds, never a pod that
+    does not start: every reference to its Secret is optional, and that Secret's ExternalSecret
+    reads the leaf alone, which no other ExternalSecret reads."""
     for container in pod_containers(deployment):
         refs = [
             (entry["name"], secret_ref(entry)) for entry in container.get("env") or []
@@ -874,6 +884,43 @@ def check_store(docs, deployment, stage):
                 leaf not in keys,
                 f"{label(doc)} reads {leaf}, so it fails while that leaf is missing",
             )
+
+
+def check_store(docs, deployment, stage):
+    """A stage whose sync leaf is missing runs with the sync refused. The migrations get neither of
+    the store's settings."""
+    migrate = env_of(named(deployment, "migrate"))
+    present = sorted(name for name in migrate if name in STORE_VARS)
+    check(
+        not present,
+        f"the migrate init container sets {present}, which the migrations never read",
+    )
+    secret, leaf, _ = stage.leaves[SYNC_TOKEN_ENV]
+    check_optional_secret(docs, deployment, secret, leaf)
+
+
+def check_tracker_events(docs, deployment, stage):
+    """A stage YouTrack posts to reads the webhook token, and runs with every delivery refused
+    while its leaf is missing; a stage it does not post to sets no token in any container. The
+    migrations never get it."""
+    check(
+        YOUTRACK_WEBHOOK_TOKEN_ENV not in env_of(named(deployment, "migrate")),
+        f"the migrate init container sets {YOUTRACK_WEBHOOK_TOKEN_ENV}, which the migrations "
+        "never read",
+    )
+    if stage.tracker_events:
+        secret, leaf, _ = stage.leaves[YOUTRACK_WEBHOOK_TOKEN_ENV]
+        check_optional_secret(docs, deployment, secret, leaf)
+        return
+    present = sorted(
+        container["name"] for container in pod_containers(deployment)
+        if YOUTRACK_WEBHOOK_TOKEN_ENV in env_of(container)
+    )
+    check(
+        not present,
+        f"containers {present} set {YOUTRACK_WEBHOOK_TOKEN_ENV} on a stage YouTrack posts no "
+        "tracker events to",
+    )
 
 
 def image_name(image):
@@ -1213,6 +1260,7 @@ def check_stage(stage):
         check_timing(deployment)
         check_controller(docs, deployment)
         check_store(docs, deployment, stage)
+        check_tracker_events(docs, deployment, stage)
     check_render_stable(stage, first)
     return first, len(docs)
 

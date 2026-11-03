@@ -44,9 +44,12 @@ of its own (`config/dev/values.yaml` says what a token saved there does).
 **YouTrack's webhook token** is production's alone, since the dev stage gets no tracker events: an
 ExternalSecret fills the Secret `pilot-youtrack-webhook-token`, key `token`, from the leaf
 `eso/prd/pilot/prd/youtrack-webhook-token`, property `token`, a copy of the instance's shared
-webhook token that SecretRotator keeps. PilotApp's slice 027 compares it with each delivery's
-`X-YouTrack-Token` on its tracker-events endpoint and wires the backend's environment variable; until
-then nothing reads the Secret.
+webhook token that SecretRotator keeps. The backend reads it as `YOUTRACK_WEBHOOK_TOKEN` and compares
+it with each delivery's `X-YouTrack-Token` on its tracker-events endpoint. The chart sets the variable
+only where a stage's values carry the Secret, so the dev stage's backend refuses every delivery. The
+Secret is optional: a backend started while it is absent refuses every delivery until its next start.
+`tests/render-chart.py` pins it on production's backend and its absence from `migrate` and from the
+dev stage.
 
 **Rotation keepers** are the `rotation_epoch` map in each stage's `config/<stage>/rotation.tfvars`,
 which `terraform/main.tf` passes to the credentials it mints: `db` re-mints the Postgres role's

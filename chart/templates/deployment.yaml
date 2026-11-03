@@ -178,6 +178,19 @@ spec:
                   name: {{ .Values.externalSecrets.secrets.sync.targetName }}
                   key: token
                   optional: true
+            # YouTrack's webhook token, which the tracker-events endpoint compares with each
+            # delivery's X-YouTrack-Token, set only where a stage's values carry its Secret: a
+            # backend without it refuses every delivery. The Secret is optional, as the sync
+            # bearer's is: a backend started while it is absent refuses every delivery until its
+            # next start. The migrate init container sets none.
+            {{- with .Values.externalSecrets.secrets.youtrackWebhookToken }}
+            - name: YOUTRACK_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .targetName }}
+                  key: token
+                  optional: true
+            {{- end }}
             # The brain's sessions, the chat's and every job's alike: their model and reasoning
             # effort, and the seconds after its last turn at which an open project chat closes.
             # The migrate init container sets none of the three.
