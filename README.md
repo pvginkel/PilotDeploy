@@ -51,8 +51,23 @@ Secret is optional: a backend started while it is absent refuses every delivery 
 `tests/render-chart.py` pins it on production's backend and its absence from `migrate` and from the
 dev stage.
 
+**The read-only role** is production's alone: `readonly_role` in `config/prd/terraform.tfvars` has
+`terraform/main.tf` make the login role `pilot_prd_readonly` on `pilot_prd_db`
+(`terraform/modules/postgres-readonly-role`), with CONNECT on the database, USAGE on its schema
+`public`, SELECT on every table and sequence in it, and default privileges that give it SELECT on
+those `pilot_prd_db`, the role the migrations run as, creates later. It writes and creates nothing.
+Its credentials go into the Secret `pilot-db-readonly` (keys `database`, `username`, `password`),
+which the chart does not read: the operator's ad-hoc tools reach the database with it, through a
+copy of its password in KubeCoder's prd catalog leaf `eso/prd/kubecoder/prd/catalog`, key
+`pilot-prd-db-readonly-password`, which PilotApp's environment projects as
+`PILOTAPP_PRD_DB_PASSWORD`. The hook holds no OpenBao credential, so the copy is made from the
+Secret outside Terraform, from an environment that can write OpenBao, and no rotation renews it.
+`tests/terraform-test.py` pins the role, its grants and its Secret on prd, and their absence from
+dev.
+
 **Rotation keepers** are the `rotation_epoch` map in each stage's `config/<stage>/rotation.tfvars`,
 which `terraform/main.tf` passes to the credentials it mints: `db` re-mints the Postgres role's
-password. SecretRotator's `terraform` kind writes it, one commit `rotate <keeper> (secret-rotator)`
+password, and `readonly`, on prd, the read-only role's, after which the catalog's copy is written
+again. SecretRotator's `terraform` kind writes it, one commit `rotate <keeper> (secret-rotator)`
 per rotation, and a changed value re-mints its credential at the next sync. A keeper once set stays
 in the file: removing it re-mints too.

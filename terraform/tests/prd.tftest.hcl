@@ -1,7 +1,8 @@
-# config/prd/ plans Pilot's database, its role and the connection Secret, and owns the
-# repository's webhook, the one stage that does. Run by tests/terraform-test.py with
-# config/prd/*.tfvars; the database's resources sit inside the postgres-db module, out of an
-# assert's reach, so that script reads them from run "db"'s plan.
+# config/prd/ plans Pilot's database, its role and the connection Secret, the database's read-only
+# role and its Secret, the one stage that has them, and owns the repository's webhook, the one
+# stage that does. Run by tests/terraform-test.py with config/prd/*.tfvars; the database's
+# resources sit inside the postgres-db and postgres-readonly-role modules, out of an assert's
+# reach, so that script reads them from run "db"'s plan.
 
 mock_provider "github" {}
 mock_provider "kubernetes" {}
@@ -27,6 +28,20 @@ run "db" {
   assert {
     condition     = module.db.secret_name == "pilot-db"
     error_message = "prd's connection Secret is not pilot-db, the one the backend reads"
+  }
+}
+
+run "readonly" {
+  command = plan
+
+  assert {
+    condition     = length(module.readonly) == 1 && module.readonly[0].username == "pilot_prd_readonly"
+    error_message = "prd's read-only role is not pilot_prd_readonly, the substrate-wide <namespace>_<name>"
+  }
+
+  assert {
+    condition     = module.readonly[0].secret_name == "pilot-db-readonly"
+    error_message = "prd's read-only Secret is not pilot-db-readonly"
   }
 }
 

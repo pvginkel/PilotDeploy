@@ -1,7 +1,7 @@
 # config/dev/ plans Pilot's dev database, its role and the connection Secret, and leaves the
-# repository's webhook to prd, which owns it. Run by tests/terraform-test.py with
-# config/dev/*.tfvars; the database's resources sit inside the postgres-db module, out of an
-# assert's reach, so that script reads them from run "db"'s plan.
+# database's read-only role and the repository's webhook to prd, which alone has them. Run by
+# tests/terraform-test.py with config/dev/*.tfvars; the database's resources sit inside the
+# postgres-db module, out of an assert's reach, so that script reads them from run "db"'s plan.
 
 mock_provider "github" {}
 mock_provider "kubernetes" {}
@@ -27,6 +27,15 @@ run "db" {
   assert {
     condition     = module.db.secret_name == "pilot-db"
     error_message = "dev's connection Secret is not pilot-db, the one the backend reads"
+  }
+}
+
+run "readonly" {
+  command = plan
+
+  assert {
+    condition     = length(module.readonly) == 0
+    error_message = "dev plans the read-only role, which is prd's alone"
   }
 }
 

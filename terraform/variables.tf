@@ -36,3 +36,9 @@ variable "manage_webhook" {
   type        = bool
   default     = false
 }
+
+variable "readonly_role" {
+  description = "Whether this stage has the read-only login role <namespace>_readonly on its database, with its Secret pilot-db-readonly. True in prd alone."
+  type        = bool
+  default     = false
+}
