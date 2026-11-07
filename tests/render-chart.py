@@ -24,7 +24,8 @@ stage's leaf or handed to the migrations, or its CA file other than the homelab 
 read-only; on its store environment off the stage's own, or its sync bearer off the stage's leaf,
 read from a Secret the pod needs to start, or handed to the migrations; on YouTrack's webhook
 token off production's leaf, read from a Secret the pod needs to start, handed to the migrations,
-or set on a stage that gets no tracker events; on the brain's model,
+or set on a stage that gets no tracker events; on the backend's VAPID key off the stage's leaf,
+the leaf's PEM rewritten on its way, or handed to any other container; on the brain's model,
 reasoning effort and chat close timeout off the ones every stage runs, or handed to the
 migrations; on the notification bridge off the in-cluster address every stage calls, handed to the
 migrations, or a stage's values without it rendering at all; on the pod's shutdown timing off the three values it is sized to, or a container's
@@ -120,6 +121,9 @@ class Stage:
             "OIDC_CLIENT_SECRET": ("pilot-oidc", oidc, "client_secret"),
             "CONTROLLER_TOKEN": ("pilot-kubecoder", kubecoder, "token"),
             SYNC_TOKEN_ENV: ("pilot-sync", f"eso/prd/pilot/{self.name}/sync", "token"),
+            VAPID_PRIVATE_KEY_ENV: (
+                "pilot-vapid", f"eso/prd/pilot/{self.name}/vapid", "private_key"
+            ),
         }
         if self.tracker_events:
             leaves[YOUTRACK_WEBHOOK_TOKEN_ENV] = (
@@ -247,6 +251,10 @@ SYNC_TOKEN_ENV = "SYNC_TOKEN"
 # compares with each delivery's X-YouTrack-Token and which refuses every delivery while unset. The
 # migrations never read it.
 YOUTRACK_WEBHOOK_TOKEN_ENV = "YOUTRACK_WEBHOOK_TOKEN"
+# The stage's VAPID key (PilotApp backend/app/app_config.py), P-256 as PKCS#8 PEM, which the
+# backend reads as the leaf holds it and signs every web push with. A production backend refuses to
+# start without it; the migrations never push.
+VAPID_PRIVATE_KEY_ENV = "VAPID_PRIVATE_KEY"
 # The brain's sessions (PilotApp backend/app/app_config.py), the same on every stage: Opus at
 # xhigh for the chat and every job alike, and an open project chat closed 3300 s, the prompt
 # cache's 55 minutes, after its last turn. The migrations read none of the three.
@@ -923,6 +931,30 @@ def check_tracker_events(docs, deployment, stage):
     )
 
 
+def check_web_push(docs, deployment, stage):
+    """The backend alone is handed the stage's VAPID key, and its Secret holds the leaf's PEM as
+    the leaf has it, through no template."""
+    present = sorted(
+        container["name"] for container in pod_containers(deployment)
+        if VAPID_PRIVATE_KEY_ENV in env_of(container)
+    )
+    check(
+        present == ["backend"],
+        f"containers {present} set {VAPID_PRIVATE_KEY_ENV}, not the backend alone",
+    )
+    secret, leaf, _ = stage.leaves[VAPID_PRIVATE_KEY_ENV]
+    templated = [
+        label(doc) for doc in docs
+        if doc["kind"] == "ExternalSecret"
+        and (doc["spec"].get("target") or {}).get("name") == secret
+        and (doc["spec"].get("target") or {}).get("template")
+    ]
+    check(
+        not templated,
+        f"{templated} template the Secret {secret}, so the backend reads {leaf} rewritten",
+    )
+
+
 def image_name(image):
     """An image reference's repository name, without registry, path, tag or digest."""
     return image.split("@", 1)[0].rsplit("/", 1)[-1].split(":", 1)[0]
@@ -1261,6 +1293,7 @@ def check_stage(stage):
         check_controller(docs, deployment)
         check_store(docs, deployment, stage)
         check_tracker_events(docs, deployment, stage)
+        check_web_push(docs, deployment, stage)
     check_render_stable(stage, first)
     return first, len(docs)
 

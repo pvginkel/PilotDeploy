@@ -62,8 +62,8 @@ notificationBridge:
 
 # ESO wiring (homelab-shared.externalsecrets), from the dev stage's leaves on the prd cluster's
 # OpenBao: its own OIDC client's id and secret, the token of Pilot's named client credential on
-# kubecoder-dev, and its store's sync bearer. The app's other secrets are generated in the cluster
-# (chart/templates/generated-secrets.yaml).
+# kubecoder-dev, its store's sync bearer and its VAPID key. The app's other secrets are generated in
+# the cluster (chart/templates/generated-secrets.yaml).
 externalSecrets:
   storeRef:
     name: openbao-prd
@@ -91,6 +91,16 @@ externalSecrets:
         - secretKey: token
           path: eso/prd/pilot/dev/sync
           property: token
+    # The stage's VAPID key (VAPID_PRIVATE_KEY), P-256 as PKCS#8 PEM, which signs every web push.
+    # Each browser's subscription is bound to its public key, so a new key ends them all: it is
+    # kept in OpenBao, never generated in the cluster. A production backend refuses to start
+    # without it.
+    vapid:
+      targetName: pilot-vapid
+      data:
+        - secretKey: private_key
+          path: eso/prd/pilot/dev/vapid
+          property: private_key
 
 images:
   # The backend's and the UI's builds, registry:5000/pilot and registry:5000/pilot-ui. Every green
