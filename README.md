@@ -32,14 +32,15 @@ call until its next start. The brain's sessions there run on `brain` in the same
 and `CHAT_CLOSE_TIMEOUT`, each required, so that a stage without them fails its render, and
 `tests/render-chart.py` pins them on both stages' backend and their absence from `migrate`.
 
-**The notification bridge** is `notificationBridge.url` in the same values, the backend's
-`NOTIFICATION_BRIDGE_URL`: `http://notification-bridge.notifications-prd.svc:8090` on both stages,
-the bridge's in-cluster Service on the prd cluster, through which the backend notifies each person
-under the token they paste on their profile. It is required, since a production backend refuses to
-start without it, so that a stage without it fails its render, and `migrate` gets none;
-`tests/render-chart.py` pins it on both stages' backend, its absence from `migrate`, and the render's
-failure without it. The people's registrations are made for production, and the dev stage has none
-of its own (`config/dev/values.yaml` says what a token saved there does).
+**The stage's VAPID key**, which signs every web push the backend sends and whose public key the
+browsers subscribe with, comes from the leaf `eso/prd/pilot/<stage>/vapid`, property
+`private_key`, a P-256 key in PKCS#8 PEM: the ExternalSecret `pilot-vapid` fills the Secret
+`pilot-vapid`, key `private_key`, with the leaf's PEM as it stands, through no template, and the
+backend reads it as `VAPID_PRIVATE_KEY`. It is kept in OpenBao and never generated in the cluster,
+since a new key ends every browser's subscription. The read is required, since a production backend
+refuses to start without the key, and no other container, `migrate` among them, gets it;
+`tests/render-chart.py` pins it on both stages: the backend alone holding it, off its stage's leaf,
+and its Secret untemplated.
 
 **YouTrack's webhook token** is production's alone, since the dev stage gets no tracker events: an
 ExternalSecret fills the Secret `pilot-youtrack-webhook-token`, key `token`, from the leaf
