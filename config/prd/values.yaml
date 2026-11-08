@@ -46,6 +46,14 @@ brain:
   reasoningEffort: xhigh
   chatCloseTimeout: 3300
 
+# The gate's slot: the work items, each in an environment of its own, running or starting across
+# every project (WORK_PARALLELISM_MAX) and in one project (PROJECT_PARALLELISM_MAX), at which the
+# gate holds a work item's start. Left out, the backend's default stands: 3 across every project,
+# and in one project the cross-project maximum.
+work:
+  parallelismMax: 5
+  projectParallelismMax: 3
+
 # ESO wiring (homelab-shared.externalsecrets), from the leaves the operator writes: the OIDC
 # client's id and secret, the token of Pilot's named KubeCoder client credential, the store's sync
 # bearer, the stage's VAPID key and YouTrack's webhook token. The app's other secrets are generated

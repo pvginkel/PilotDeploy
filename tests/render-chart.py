@@ -27,9 +27,10 @@ token off production's leaf, read from a Secret the pod needs to start, handed t
 or set on a stage that gets no tracker events; on the backend's VAPID key off the stage's leaf,
 the leaf's PEM rewritten on its way, or handed to any other container; on the brain's model,
 reasoning effort and chat close timeout off the ones every stage runs, or handed to the
-migrations; on the pod's shutdown timing off the three values it is sized to, or a container's
-preStop wait off the backend's; and on a stage's values or render naming another stage's host,
-MCP host, KubeCoder, store or leaves.
+migrations; on the gate's slot, across every project and in one, off the stage's values, or
+handed to the migrations; on the pod's shutdown timing off the three values it is sized to, or a
+container's preStop wait off the backend's; and on a stage's values or render naming another
+stage's host, MCP host, KubeCoder, store or leaves.
 
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
@@ -77,6 +78,9 @@ class Stage:
     # Whether YouTrack posts its tracker events to the stage, and so its backend reads the
     # webhook token.
     tracker_events: bool
+    # The gate's slot the stage's values set, {var: value}; a var left out keeps the backend's
+    # default, and the chart sets it not at all.
+    parallelism: dict = dataclasses.field(default_factory=dict)
 
     @property
     def namespace(self):
@@ -145,6 +149,7 @@ STAGES = (
         kubecoder="https://kubecoder.home",
         store="pvginkel-pilotprojects-8b0225",
         tracker_events=True,
+        parallelism={"WORK_PARALLELISM_MAX": "5", "PROJECT_PARALLELISM_MAX": "3"},
     ),
     Stage(
         "dev",
@@ -262,6 +267,10 @@ BRAIN_ENV = {
     "BRAIN_REASONING_EFFORT": "xhigh",
     "CHAT_CLOSE_TIMEOUT": "3300",
 }
+# The gate's slot (PilotApp backend/app/app_config.py, F143.4): the work items running or
+# starting across every project, and in one project, at which the gate holds a work item's start.
+# The values' `work` sets each; the migrations read neither.
+PARALLELISM_VARS = ("WORK_PARALLELISM_MAX", "PROJECT_PARALLELISM_MAX")
 # The root's common name, which a self-signed certificate's DER carries twice: issuer and subject.
 HOMELAB_ROOT_CN = b"homelab-ca Root CA"
 PEM_CERTIFICATE = re.compile(
@@ -635,6 +644,7 @@ def backend_env(stage):
         MCP_SERVER_URL_ENV: stage.mcp_url,
         **BRAIN_ENV,
         **SHUTDOWN_ENV,
+        **stage.parallelism,
     }
 
 
@@ -694,6 +704,24 @@ def check_pod(docs, stage):
         f"the migrate init container sets {present}, which the migrations never read",
     )
     return deployment
+
+
+def check_parallelism(deployment, stage):
+    """The backend sets the gate's slot its stage's values set and no other; the migrations none."""
+    backend = sorted(
+        name for name in env_of(named(deployment, "backend")) if name in PARALLELISM_VARS
+    )
+    check(
+        backend == sorted(stage.parallelism),
+        f"the backend sets {backend} of the gate's slot, not {sorted(stage.parallelism)}",
+    )
+    migrate = sorted(
+        name for name in env_of(named(deployment, "migrate")) if name in PARALLELISM_VARS
+    )
+    check(
+        not migrate,
+        f"the migrate init container sets {migrate}, which the migrations never read",
+    )
 
 
 def check_mcp(deployment):
@@ -1271,6 +1299,7 @@ def check_stage(stage):
         check_store(docs, deployment, stage)
         check_tracker_events(docs, deployment, stage)
         check_web_push(docs, deployment, stage)
+        check_parallelism(deployment, stage)
     check_render_stable(stage, first)
     return first, len(docs)
 

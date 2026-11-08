@@ -32,6 +32,13 @@ call until its next start. The brain's sessions there run on `brain` in the same
 and `CHAT_CLOSE_TIMEOUT`, each required, so that a stage without them fails its render, and
 `tests/render-chart.py` pins them on both stages' backend and their absence from `migrate`.
 
+**The gate's slot**, how many work items run at once, each in an environment of its own, is set in
+`work` in the same values: `parallelismMax` across every project and `projectParallelismMax` in one
+set the backend's `WORK_PARALLELISM_MAX` and `PROJECT_PARALLELISM_MAX`. Each is optional: one left
+out is not set at all, and the backend's default stands, 3 across every project and in one project
+the cross-project maximum. Production runs 5 and 3; the dev stage sets neither.
+`tests/render-chart.py` pins each stage's backend on what its values set and `migrate` on neither.
+
 **The stage's VAPID key**, which signs every web push the backend sends and whose public key the
 browsers subscribe with, comes from the leaf `eso/prd/pilot/<stage>/vapid`, property
 `private_key`, a P-256 key in PKCS#8 PEM: the ExternalSecret `pilot-vapid` fills the Secret

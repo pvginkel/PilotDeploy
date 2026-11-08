@@ -200,6 +200,20 @@ spec:
               value: {{ required "brain.reasoningEffort is not set" .Values.brain.reasoningEffort | quote }}
             - name: CHAT_CLOSE_TIMEOUT
               value: {{ required "brain.chatCloseTimeout is not set" .Values.brain.chatCloseTimeout | quote }}
+            # The gate's slot: the work items running or starting across every project, and in
+            # one project, at which it holds a work item's start. Each is left unset where values
+            # say nothing, and the backend's default stands: 3 across every project, and in one
+            # project the cross-project maximum. The migrate init container sets neither.
+            {{- with .Values.work }}
+            {{- with .parallelismMax }}
+            - name: WORK_PARALLELISM_MAX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .projectParallelismMax }}
+            - name: PROJECT_PARALLELISM_MAX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             # Pilot's MCP server, the mcp container below, at the address a session reaches it on
             # (chart/templates/mcp-service.yaml): every session Pilot creates is handed it. The
             # server refuses to start in production without it; the migrate init container sets
