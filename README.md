@@ -19,9 +19,27 @@ promoted. prd's Terraform state owns the repository's webhook (`manage_webhook`)
 image's second entry point (`python -m pilot_mcp`), the container `mcp`, calling the backend over
 the pod's loopback, behind a Service of its own, `pilot-mcp`, at the stage's `mcp.host` in
 `config/<stage>/values.yaml`: `pilot-dev-mcp.home` or `pilot-mcp.home`, intranet only on both
-stages, since the session's bearer is its whole authentication. The backend hands a work item's
-session `https://<mcp.host>/mcp` (`MCP_SERVER_URL`), and a brain session the brain's tools under
-it, `…/mcp/store`.
+stages, since a bearer is a caller's whole authentication. The backend hands a work item's session
+`https://<mcp.host>/mcp` (`MCP_SERVER_URL`), and a brain session the brain's tools under it,
+`…/mcp/store`; under it too is Pilot's projects surface, `…/mcp/projects`, which any session of
+KubeCoder's production fleet calls with the surface's shared token.
+
+**The projects surface's settings** are the `mcp` container's alone. Its shared token,
+`PILOT_MCP_PROJECTS_TOKEN`, comes from the Secret `pilot-projects-token`, key `token`, which an
+ExternalSecret of the same name fills from the one leaf both stages read,
+`eso/prd/pilot/projects-token`, property `token`, under neither stage's tree, since a session
+pointed at dev's surface sends what it sends production's. The stage's service user, the Keycloak
+client whose client-credentials token the server calls the backend's `/api/` routes under, comes
+from the Secret `pilot-service-user`, keys `client_id` and `client_secret`, filled from the stage's
+own leaf, `eso/prd/pilot/<stage>/service-user`, as `PILOT_MCP_SERVICE_CLIENT_ID` and
+`PILOT_MCP_SERVICE_CLIENT_SECRET`. `PILOT_MCP_TOKEN_URL` is a plain value, built in the chart from
+the stage's `oidc.issuerUrl` as `<issuer>/protocol/openid-connect/token`, so the endpoint follows
+the issuer whose tokens the backend admits. Every reference to the two Secrets is optional and each
+leaf has an ExternalSecret of its own: a missing leaf leaves the pod starting and refuses the
+surface alone, and an `mcp` started before its Secrets exist refuses every call to the surface
+until its next start. `tests/render-chart.py` pins the four on both stages' `mcp` and on no other
+container, both Secrets' references optional, each stage's service-user leaf its own, and the
+shared leaf as no stage's.
 
 **Each stage's store** is a KubeCoder environment on its fleet whose `pilot-sync` sidecar the
 backend admits: `store.environmentId` in `config/<stage>/values.yaml` sets `STORE_ENVIRONMENT_ID`,
