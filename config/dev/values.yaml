@@ -14,8 +14,9 @@ host: pilot-dev.home
 public: false
 
 # Pilot's MCP server, at https://<host>/mcp: the backend hands every session it creates that
-# address (MCP_SERVER_URL). Internal, whatever the site is: the front door serves it over HTTPS
-# from a homelab step-ca certificate (chart/templates/mcp-service.yaml).
+# address (MCP_SERVER_URL), and its projects surface is at https://<host>/mcp/projects. Internal,
+# whatever the site is: the front door serves it over HTTPS from a homelab step-ca certificate
+# (chart/templates/mcp-service.yaml).
 mcp:
   host: pilot-dev-mcp.home
 
@@ -53,7 +54,8 @@ brain:
 
 # ESO wiring (homelab-shared.externalsecrets), from the dev stage's leaves on the prd cluster's
 # OpenBao: its own OIDC client's id and secret, the token of Pilot's named client credential on
-# kubecoder-dev, its store's sync bearer and its VAPID key. The app's other secrets are generated in
+# kubecoder-dev, its store's sync bearer, its VAPID key and its service user's client; and from the
+# one leaf both stages read, the projects surface's token. The app's other secrets are generated in
 # the cluster (chart/templates/generated-secrets.yaml).
 externalSecrets:
   storeRef:
@@ -92,6 +94,29 @@ externalSecrets:
         - secretKey: private_key
           path: eso/prd/pilot/dev/vapid
           property: private_key
+    # The stage's service user (PILOT_MCP_SERVICE_CLIENT_ID, PILOT_MCP_SERVICE_CLIENT_SECRET): the
+    # Keycloak client whose client-credentials token the MCP server calls the API under, behind its
+    # projects surface. An ExternalSecret of its own: while the leaf is missing, only that surface
+    # is refused.
+    serviceUser:
+      targetName: pilot-service-user
+      data:
+        - secretKey: client_id
+          path: eso/prd/pilot/dev/service-user
+          property: client_id
+        - secretKey: client_secret
+          path: eso/prd/pilot/dev/service-user
+          property: client_secret
+    # The projects surface's token (PILOT_MCP_PROJECTS_TOKEN), the bearer its callers present. One
+    # leaf for both stages, under neither's tree: an environment sends the same
+    # PILOT_PROJECTS_TOKEN to whichever stage's surface it calls. An ExternalSecret of its own:
+    # while the leaf is missing, only that surface is refused.
+    projectsToken:
+      targetName: pilot-projects-token
+      data:
+        - secretKey: token
+          path: eso/prd/pilot/projects-token
+          property: token
 
 images:
   # The backend's and the UI's builds, registry:5000/pilot and registry:5000/pilot-ui. Every green

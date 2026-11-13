@@ -14,9 +14,12 @@ key nothing in the namespace provides, a `$(VAR)` the kubelet cannot resolve, a 
 secret belongs, the site's annotations off the stage's host and reach (public or internal), and the
 backend's in-pod wiring (its drain) off the port and path the image uses. It fails on the MCP
 server's container off the image's entry point, port and health routes, on its address of the API
-off the backend on loopback, on any other setting of it, a database's, a Secret's or FLASK_ENV;
-on its Service off the stage's MCP host or off the intranet; and on the backend's MCP_SERVER_URL
-off that host's /mcp or handed to the migrations. It fails too on a
+off the backend on loopback, on its projects surface's token off the one leaf both stages read, its
+service-user client off the stage's leaf, either read from a Secret the pod needs to start, its
+token endpoint off the realm's, or any of the four handed to another container, on any other
+setting of it, a database's or FLASK_ENV; on its Service off the stage's MCP host or off the
+intranet; and on the backend's MCP_SERVER_URL off that host's /mcp or handed to the migrations. It
+fails too on a
 container running the retired SSE gateway: the backend serves the browser's stream itself, and on
 the links in text off the addresses the stage sets or set where values leave them out. It fails on
 the backend's STAGE off the stage, its KubeCoder controller off the stage's own, its token off the
@@ -30,7 +33,7 @@ reasoning effort and chat close timeout off the ones every stage runs, or handed
 migrations; on the gate's slot, across every project and in one, off the stage's values, or
 handed to the migrations; on the pod's shutdown timing off the three values it is sized to, or a
 container's preStop wait off the backend's; and on a stage's values or render naming another
-stage's host, MCP host, KubeCoder, store or leaves.
+stage's host, MCP host, KubeCoder, store or own leaves.
 
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
@@ -105,7 +108,7 @@ class Stage:
 
     @property
     def mcp_annotations(self):
-        # Intranet only on every stage: the session's bearer is the whole of its authentication.
+        # Intranet only on every stage: a bearer is the whole of a caller's authentication.
         return {SERVER_NAME: self.mcp_host, IS_PUBLIC: "false", ENABLE_SSL: "yes"}
 
     @property
@@ -135,6 +138,17 @@ class Stage:
                 "token",
             )
         return leaves
+
+    @property
+    def mcp_leaves(self):
+        """The leaves the MCP server's env vars read, as `leaves` gives the backend's: the stage's
+        own service-user client, and the projects surface's token, one leaf for both stages."""
+        service_user = f"eso/prd/pilot/{self.name}/service-user"
+        return {
+            PROJECTS_TOKEN_ENV: ("pilot-projects-token", PROJECTS_TOKEN_LEAF, "token"),
+            SERVICE_CLIENT_ID_ENV: ("pilot-service-user", service_user, "client_id"),
+            SERVICE_CLIENT_SECRET_ENV: ("pilot-service-user", service_user, "client_secret"),
+        }
 
 
 # Production, the public site on the operator's own KubeCoder, and dev, internal beside it on the
@@ -212,12 +226,33 @@ BACKEND_PROBES = {"readinessProbe": "/health/readyz", "livenessProbe": "/health/
 MIGRATE_ARGS = ["python", "-m", "app.cli", "upgrade-db"]
 # PilotApp's MCP server (backend/pilot_mcp/): the image's second entry point, run as a module, its
 # port and its health routes, answered without a bearer (config.py, server.py), and its address of
-# the API, the backend on loopback. It reads no other setting. Its Service is the front door's to
-# proxy on port 80, the one it proxies without a target-port annotation, and the endpoint is /mcp.
+# the API, the backend on loopback. Its Service is the front door's to proxy on port 80, the one it
+# proxies without a target-port annotation, and the endpoint is /mcp.
 MCP_ARGS = ["python", "-m", "pilot_mcp"]
 MCP_PORT = 3502
 MCP_PROBES = {"readinessProbe": "/health/readyz", "livenessProbe": "/health/healthz"}
-MCP_ENV = {"PILOT_MCP_API_URL": f"http://localhost:{BACKEND_PORT}", "PILOT_MCP_PORT": str(MCP_PORT)}
+# Its projects surface, at /mcp/projects (config.py): the bearer its callers present; the token
+# endpoint of the realm both stages sign in against, a plain address; and the stage's service-user
+# client, under whose client-credentials token it calls the API. While one of the four is unset
+# the server refuses every call to the surface and serves the rest. No other container reads them.
+PROJECTS_TOKEN_ENV = "PILOT_MCP_PROJECTS_TOKEN"
+TOKEN_URL_ENV = "PILOT_MCP_TOKEN_URL"
+SERVICE_CLIENT_ID_ENV = "PILOT_MCP_SERVICE_CLIENT_ID"
+SERVICE_CLIENT_SECRET_ENV = "PILOT_MCP_SERVICE_CLIENT_SECRET"
+PROJECTS_VARS = (
+    PROJECTS_TOKEN_ENV, TOKEN_URL_ENV, SERVICE_CLIENT_ID_ENV, SERVICE_CLIENT_SECRET_ENV,
+)
+# The surface's token is one value for both stages: an environment sends the same
+# PILOT_PROJECTS_TOKEN to whichever stage's surface it calls. Its leaf lies under neither stage's
+# tree, and is no stage's own.
+PROJECTS_TOKEN_LEAF = "eso/prd/pilot/projects-token"
+# The MCP server's plain settings, the same on every stage; its others it reads from Secrets
+# (Stage.mcp_leaves).
+MCP_ENV = {
+    "PILOT_MCP_API_URL": f"http://localhost:{BACKEND_PORT}",
+    "PILOT_MCP_PORT": str(MCP_PORT),
+    TOKEN_URL_ENV: "https://auth.ginbov.nl/realms/homelab/protocol/openid-connect/token",
+}
 MCP_SERVICE = "pilot-mcp"
 MCP_SERVICE_PORT = 80
 MCP_PATH = "/mcp"
@@ -298,6 +333,8 @@ GENERATED = {"pilot-secret-key", "pilot-drain-auth"}
 GENERATOR_KEY = "password"
 # An env var or query parameter named like this carries a secret, so never a literal.
 SECRET_NAME = re.compile(r"secret|password|token|(^|_)key$", re.IGNORECASE)
+# Env vars named like one that carry an address.
+ADDRESSES = (TOKEN_URL_ENV,)
 # A Kubernetes dependent-env reference; `$$(` escapes a literal `$(`.
 ENV_REF = re.compile(r"(?<!\$)\$\(([A-Za-z_][A-Za-z0-9_]*)\)")
 # Env vars two containers must define alike, references resolved: the migrations run against the
@@ -724,9 +761,10 @@ def check_parallelism(deployment, stage):
     )
 
 
-def check_mcp(deployment):
+def check_mcp(deployment, stage):
     """The MCP server runs the image's second entry point on its port, answers its probes there,
-    and calls the backend on loopback; it is handed nothing else, and the migrations are not handed
+    calls the backend on loopback and mints its token at the realm's endpoint; beside them it reads
+    its projects surface's secrets and is handed nothing else, and the migrations are not handed
     its address."""
     mcp = named(deployment, "mcp")
     check(
@@ -743,12 +781,14 @@ def check_mcp(deployment):
         )
     env = {
         name: entry.get("value") if set(entry) == {"name", "value"} else entry
-        for name, (_, entry) in env_of(mcp).items()
+        for name, (_, entry) in env_of(mcp).items() if secret_ref(entry) is None
     }
+    secrets = sorted(name for name, (_, entry) in env_of(mcp).items() if secret_ref(entry))
     check(
-        env == MCP_ENV and not mcp.get("envFrom"),
-        f"the mcp container's env is {env}{' with an envFrom' if mcp.get('envFrom') else ''}, not "
-        f"{MCP_ENV} alone",
+        env == MCP_ENV and secrets == sorted(stage.mcp_leaves) and not mcp.get("envFrom"),
+        f"the mcp container's env is {env}, with {secrets} read from Secrets"
+        f"{' and an envFrom' if mcp.get('envFrom') else ''}, not {MCP_ENV} with "
+        f"{sorted(stage.mcp_leaves)} read from Secrets, alone",
     )
     check(
         MCP_SERVER_URL_ENV not in env_of(named(deployment, "migrate")),
@@ -971,6 +1011,21 @@ def check_web_push(docs, deployment, stage):
     )
 
 
+def check_projects(docs, deployment, stage):
+    """The MCP server alone is handed the projects surface's settings, and a stage whose
+    service-user leaf or whose token's leaf is missing runs with that surface refused."""
+    for container in pod_containers(deployment):
+        if container["name"] == "mcp":
+            continue
+        present = sorted(name for name in env_of(container) if name in PROJECTS_VARS)
+        check(
+            not present,
+            f"container {container['name']} sets {present}, which the MCP server alone reads",
+        )
+    for secret, leaf in sorted({(secret, leaf) for secret, leaf, _ in stage.mcp_leaves.values()}):
+        check_optional_secret(docs, deployment, secret, leaf)
+
+
 def image_name(image):
     """An image reference's repository name, without registry, path, tag or digest."""
     return image.split("@", 1)[0].rsplit("/", 1)[-1].split(":", 1)[0]
@@ -1029,7 +1084,7 @@ def check_env(deployment):
         env = env_of(container)
         from_secrets = {var for var, (_, entry) in env.items() if secret_ref(entry)}
         for var, (position, entry) in env.items():
-            if SECRET_NAME.search(var):
+            if SECRET_NAME.search(var) and var not in ADDRESSES:
                 check(
                     secret_ref(entry) is not None,
                     f"container {name}'s {var} is not read from a Secret: a literal where a "
@@ -1108,27 +1163,32 @@ def check_external_secrets(docs, deployment, stage):
                 f"{label(doc)} reads through {doc['spec']['secretStoreRef']}, not {STORE}",
             )
 
-    env = env_of(named(deployment, "backend"))
-    for var, (secret, leaf, prop) in stage.leaves.items():
-        ref = secret_ref(env.get(var, (None, {}))[1]) or {}
-        check(
-            ref.get("name") == secret,
-            f"the backend's {var} reads the Secret {ref.get('name')}, not {secret}",
-        )
-        filled = [
-            doc for doc in secrets
-            if (doc["spec"].get("target") or {}).get("name") == ref.get("name")
-            and "secretStoreRef" in doc["spec"]
-        ]
-        sources = [
-            item["remoteRef"] for doc in filled for item in doc["spec"].get("data") or []
-            if item["secretKey"] == ref.get("key")
-        ]
-        check(
-            sources == [{"key": leaf, "property": prop}],
-            f"the backend's {var} reads {ref}, which no ExternalSecret fills from {leaf} "
-            f"property {prop}: {sources}",
-        )
+    readers = (
+        ("backend", "the backend's", stage.leaves),
+        ("mcp", "the mcp container's", stage.mcp_leaves),
+    )
+    for container, whose, leaves in readers:
+        env = env_of(named(deployment, container))
+        for var, (secret, leaf, prop) in leaves.items():
+            ref = secret_ref(env.get(var, (None, {}))[1]) or {}
+            check(
+                ref.get("name") == secret,
+                f"{whose} {var} reads the Secret {ref.get('name')}, not {secret}",
+            )
+            filled = [
+                doc for doc in secrets
+                if (doc["spec"].get("target") or {}).get("name") == ref.get("name")
+                and "secretStoreRef" in doc["spec"]
+            ]
+            sources = [
+                item["remoteRef"] for doc in filled for item in doc["spec"].get("data") or []
+                if item["secretKey"] == ref.get("key")
+            ]
+            check(
+                sources == [{"key": leaf, "property": prop}],
+                f"{whose} {var} reads {ref}, which no ExternalSecret fills from {leaf} "
+                f"property {prop}: {sources}",
+            )
 
     generators = sorted(doc["metadata"]["name"] for doc in docs if doc["kind"] == "Password")
     check(
@@ -1249,20 +1309,23 @@ def check_render_stable(stage, first):
 
 
 def stage_markers(stage):
-    """What names the stage alone: its host, its MCP host, its KubeCoder, its store, its leaves."""
+    """What names the stage alone: its host, its MCP host, its KubeCoder, its store, and its own
+    leaves, which the projects surface's token's, read by both stages, is not."""
+    leaves = {leaf for _, leaf, _ in [*stage.leaves.values(), *stage.mcp_leaves.values()]}
     return {
         stage.host,
         stage.mcp_host,
         stage.kubecoder,
         stage.store,
-        *(leaf for _, leaf, _ in stage.leaves.values()),
+        *(leaves - {PROJECTS_TOKEN_LEAF}),
     }
 
 
 def check_isolation(renders):
-    """No stage's values or render name another stage's host, MCP host, KubeCoder, store or leaves:
-    dev's sessions are never the operator's own fleet's nor handed production's MCP server, dev's
-    sync never admits production's store, and production never reads dev's client or bearer."""
+    """No stage's values or render name another stage's host, MCP host, KubeCoder, store or own
+    leaves: dev's sessions are never the operator's own fleet's nor handed production's MCP server,
+    dev's sync never admits production's store, and production never reads dev's client, service
+    user or bearer."""
     for stage in STAGES:
         texts = {stage.values: values_text(stage), "its render": renders[stage.name]}
         for other in STAGES:
@@ -1292,13 +1355,14 @@ def check_stage(stage):
         check_external_secrets(docs, deployment, stage)
         check_site_service(docs, deployment, stage)
         check_mcp_service(docs, deployment, stage)
-        check_mcp(deployment)
+        check_mcp(deployment, stage)
         check_wiring(deployment)
         check_timing(deployment)
         check_controller(docs, deployment)
         check_store(docs, deployment, stage)
         check_tracker_events(docs, deployment, stage)
         check_web_push(docs, deployment, stage)
+        check_projects(docs, deployment, stage)
         check_parallelism(deployment, stage)
     check_render_stable(stage, first)
     return first, len(docs)

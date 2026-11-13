@@ -3,7 +3,7 @@ Pilot: the Flask backend, its MCP server and the UI's nginx in one pod, reaching
 loopback. The UI's nginx is the site's front: it serves the SPA and proxies /api/ to the backend,
 the browser's SSE stream (/api/sse/stream) included (PilotApp frontend/nginx.conf). The MCP server
 is the front of its own Service (chart/templates/mcp-service.yaml), and calls the backend's
-/tools/ routes, which the UI's nginx never proxies.
+/tools/ routes, which the UI's nginx never proxies, and for its projects surface the /api/ ones.
 */}}
 {{- /* Seconds every container of a terminating pod goes on serving: the Service drops the pod from
 its endpoints asynchronously, and traffic reaches it until it has. */}}
@@ -266,9 +266,12 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
         # Pilot's MCP server, the backend image's second entry point (PilotApp backend/pilot_mcp/),
-        # behind the Service pilot-mcp. Each of its tools is one call to the backend's /tools/
-        # routes over loopback under the calling session's bearer; it reads no database, no Secret
-        # and no FLASK_ENV. `args`, not `command`: the image's ENTRYPOINT is tini.
+        # behind the Service pilot-mcp. Each tool of its two servers for Pilot's own sessions is
+        # one call to the backend's /tools/ routes over loopback under the calling session's
+        # bearer. Each tool of its third, the projects surface at /mcp/projects, is one call to the
+        # backend's /api/ routes over loopback under a token the process mints itself, as the
+        # stage's service user. It reads no database and no FLASK_ENV. `args`, not `command`: the
+        # image's ENTRYPOINT is tini.
         - name: mcp
           image: registry:5000/pilot{{ .Values.images.pilot }}
           args: ["python", "-m", "pilot_mcp"]
@@ -280,6 +283,32 @@ spec:
               value: http://localhost:3501
             - name: PILOT_MCP_PORT
               value: "3502"
+            # The projects surface: the bearer its callers present, one token for both stages; the
+            # token endpoint of the realm the backend's gate takes as its issuer; and the stage's
+            # service-user client, whose client-credentials token the server calls the API under.
+            # Both Secrets are optional: a server started while one is absent refuses every call
+            # to the surface, and serves its two other servers and its probes, until its next
+            # start.
+            - name: PILOT_MCP_PROJECTS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecrets.secrets.projectsToken.targetName }}
+                  key: token
+                  optional: true
+            - name: PILOT_MCP_TOKEN_URL
+              value: {{ .Values.oidc.issuerUrl }}/protocol/openid-connect/token
+            - name: PILOT_MCP_SERVICE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecrets.secrets.serviceUser.targetName }}
+                  key: client_id
+                  optional: true
+            - name: PILOT_MCP_SERVICE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecrets.secrets.serviceUser.targetName }}
+                  key: client_secret
+                  optional: true
           lifecycle:
             preStop:
               sleep:

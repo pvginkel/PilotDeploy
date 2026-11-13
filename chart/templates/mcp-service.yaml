@@ -1,8 +1,10 @@
 {{- /*
 Pilot's MCP server at https://<mcp.host>/mcp, proxied to port 80, the pod's mcp container: the
-endpoint every session Pilot creates is handed (the backend's MCP_SERVER_URL). Intranet only, on
-both stages: the session's bearer is the whole of its authentication. The front door serves it over
-HTTPS from a homelab step-ca certificate, and the homelab DNS publishes its .home name.
+endpoint every session Pilot creates is handed (the backend's MCP_SERVER_URL), and under it, at
+/mcp/projects, the projects surface. Intranet only, on both stages: a bearer is the whole of a
+caller's authentication, a session's own at the first and the surface's shared token at the second.
+The front door serves it over HTTPS from a homelab step-ca certificate, and the homelab DNS
+publishes its .home name.
 */}}
 {{- $mcpHost := required "mcp.host is not set" .Values.mcp.host }}
 apiVersion: v1
