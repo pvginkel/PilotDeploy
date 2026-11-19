@@ -191,6 +191,16 @@ spec:
                   key: token
                   optional: true
             {{- end }}
+            # The collector's bearer, which its calls to /api/collector carry, set where the
+            # collector is rendered (chart/templates/collector.yaml): a backend without it refuses
+            # every such call. The migrate init container sets none.
+            {{- if .Values.images.collector }}
+            - name: COLLECTOR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pilot-collector-token
+                  key: password
+            {{- end }}
             # The brain's sessions, the chat's and every job's alike: their model and reasoning
             # effort, and the seconds after its last turn at which an open project chat closes.
             # The migrate init container sets none of the three.

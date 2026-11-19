@@ -6,9 +6,10 @@
 //
 // The order, each step run only once the one before it succeeded, so prd never names a prd-<n>
 // tag that does not exist:
-//   1. pilot and pilot-ui, which the commit's config/prd/values.yaml pins to prd-<n>, and
-//      pilot-sync, which no values file pins, of the same build <n>, get the tag prd-<n>,
-//      retagged from PilotApp/Build-Main's dev-<n>;
+//   1. pilot, pilot-ui and pilot-collector, which the commit's config/prd/values.yaml pins to
+//      prd-<n>, and pilot-sync, which no values file pins, of the same build <n>, get the tag
+//      prd-<n>, retagged from PilotApp/Build-Main's dev-<n>; a commit that pins no
+//      pilot-collector, whose chart renders none, has none retagged;
 //   2. prd fast-forwards to the commit;
 //   3. pilot-sync's prd-latest moves to its prd-<n>, so it names the sidecar of the build prd
 //      runs, a rollback's older build included: production's store environment runs
@@ -34,13 +35,15 @@
 library identifier: 'JenkinsPipelineUtils', changelog: false
 
 /**
- * The images a prd values file releases, as the references prd deploys: `images.pilot` and
- * `images.pilotUI`, the tag suffixes the chart appends to `registry:5000/pilot` and
- * `registry:5000/pilot-ui`, and `registry:5000/pilot-sync`, which no values file pins, at the
- * build those two pin.
+ * The images a prd values file releases, as the references prd deploys: `images.pilot`,
+ * `images.pilotUI` and `images.collector`, the tag suffixes the chart appends to
+ * `registry:5000/pilot`, `registry:5000/pilot-ui` and `registry:5000/pilot-collector`, and
+ * `registry:5000/pilot-sync`, which no values file pins, at the build those pin.
  *
- * Both suffixes must be `:prd-<n>` with the same <n>, one PilotApp/Build-Main build's, which is
- * also what keeps each reference safe to quote into a shell line.
+ * Every suffix must be `:prd-<n>` with the same <n>, one PilotApp/Build-Main build's, which is
+ * also what keeps each reference safe to quote into a shell line. `images.collector` alone may be
+ * empty or absent: no build pushed a pilot-collector for that commit, its chart renders no
+ * collector, and none is released.
  *
  * @param values  config/prd/values.yaml of the commit being promoted, as readYaml parses it.
  * @return [image:, build: '<n>', tag: 'prd-<n>'] per image.
@@ -48,22 +51,28 @@ library identifier: 'JenkinsPipelineUtils', changelog: false
 List<Map<String, String>> prdPins(Map values) {
     Map images = values.images instanceof Map ? values.images : [:]
 
-    List<String> keys = ['pilot', 'pilotUI']
+    List<String> keys = ['pilot', 'pilotUI', 'collector']
+    List<String> pinned = ['pilot', 'pilot-ui', 'pilot-collector']
+    List<String> names = []
     String build = null
     for (int i = 0; i < keys.size(); i++) {
         String suffix = images[keys[i]]?.toString()
+        if (keys[i] == 'collector' && !suffix) {
+            continue
+        }
         if (suffix == null || !(suffix ==~ /:prd-[0-9]+/)) {
             error("config/prd/values.yaml pins images.${keys[i]} to '${suffix}', not a :prd-<n> tag")
         }
-        String pinned = suffix.substring(':prd-'.length())
-        if (build != null && pinned != build) {
-            error("config/prd/values.yaml pins images.pilot to prd-${build} and images.pilotUI to " +
-                "prd-${pinned}: one PilotApp/Build-Main build pins both")
+        String number = suffix.substring(':prd-'.length())
+        if (build != null && number != build) {
+            error("config/prd/values.yaml pins images.${keys[0]} to prd-${build} and images.${keys[i]} to " +
+                "prd-${number}: one PilotApp/Build-Main build pins every image")
         }
-        build = pinned
+        build = number
+        names << pinned[i]
     }
+    names << 'pilot-sync'
 
-    List<String> names = ['pilot', 'pilot-ui', 'pilot-sync']
     List<Map<String, String>> pins = []
     for (int i = 0; i < names.size(); i++) {
         pins << [image: "registry:5000/${names[i]}".toString(), build: build, tag: "prd-${build}".toString()]

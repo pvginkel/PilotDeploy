@@ -1,0 +1,108 @@
+{{- /*
+Pilot's collector (PilotApp collector/): one process in a pod of its own, on the node that holds
+the stage's fleet's home. It walks the transcripts there and publishes them to the backend, which
+it calls through Service pilot, and it serves a conversation's reading to the backend behind the
+Service below, which no front door proxies. The bearer the backend reads as COLLECTOR_TOKEN is the
+whole of either call's authentication.
+
+Rendered only where images.collector is set: PilotDeploy carries the pin's key before a PilotApp
+build has pushed the image, and the backend is handed the bearer under the same condition
+(chart/templates/deployment.yaml).
+*/}}
+{{- with .Values.images.collector }}
+{{- $home := required "collector.home is not set" $.Values.collector.home }}
+{{- /* Claude Code's folder as the fleet's sessions have it, which the plugins' install paths name
+(installed_plugins.json); the image's COLLECTOR_HOME is the folder that holds `projects`. */}}
+{{- $claude := "/home/ubuntu/.claude" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pilot-collector
+spec:
+  replicas: 1
+  # No two walks at a time, a roll included: the old pod is gone before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pilot-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pilot-collector
+    spec:
+      # Service link variables are noise to the container.
+      enableServiceLinks: false
+      # The bearer is the pod's one credential: it calls no Kubernetes API.
+      automountServiceAccountToken: false
+      # The node zpool5 is on, where each fleet's home is a host path, and that node's taint.
+      nodeSelector:
+        homelab.local/storage: zpool5
+      tolerations:
+        - key: homelab.local/performance
+          operator: Equal
+          value: high
+          effect: NoSchedule
+      containers:
+        # The image's own user, entry point and command: uid 1000, the home's user, whose
+        # `projects` no other user can list.
+        - name: collector
+          image: registry:5000/pilot-collector{{ . }}
+          ports:
+            - name: readings
+              containerPort: 3503
+          env:
+            # Service pilot, the UI's nginx, which proxies /api/ to the backend.
+            - name: COLLECTOR_PILOT_URL
+              value: http://pilot
+            - name: COLLECTOR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pilot-collector-token
+                  key: password
+            - name: COLLECTOR_HOME
+              value: {{ $claude }}
+          volumeMounts:
+            - name: projects
+              mountPath: {{ $claude }}/projects
+              readOnly: true
+            - name: plugins
+              mountPath: {{ $claude }}/plugins
+              readOnly: true
+          # Every path of the image's server asks for the bearer, so the probes are the port's.
+          readinessProbe:
+            tcpSocket:
+              port: readings
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: readings
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      # `Directory`: a folder the node lacks fails the pod's start, where the default would have
+      # the kubelet make it, as root, in the fleet's home.
+      volumes:
+        - name: projects
+          hostPath:
+            path: {{ $home }}/.claude/projects
+            type: Directory
+        - name: plugins
+          hostPath:
+            path: {{ $home }}/.claude/plugins
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pilot-collector
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pilot-collector
+  ports:
+    - name: readings
+      protocol: TCP
+      port: 3503
+      targetPort: readings
+{{- end }}

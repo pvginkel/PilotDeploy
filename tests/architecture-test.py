@@ -6,8 +6,9 @@ pilot-deploy, dev as pilot-dev-deploy. In one of two modes:
 
 - plain, after a run against the published dataset, as AaC/PilotDeploy and AaC/PilotDeployDev
   generate: whether or not the `pilot-app` producer is published, the four containers are the
-  pod's instances, and the stage's host, a web UI on the UI's service, and its MCP host, the MCP
-  server's alone and no web UI, are the exposed hosts;
+  pod's instances, the collector's container, in its own workload, an instance beside them where
+  the stage's values pin its image and absent where they do not, and the stage's host, a web UI on
+  the UI's service, and its MCP host, the MCP server's alone and no web UI, are the exposed hosts;
 - `--resolved`, after a run with PilotApp's model overlaid (ARCH_DATASET_OVERLAY): every mapping
   resolves, the host is on the UI's service, and the backend is Served by the database pooler and
   Keycloak, the migrations by the pooler.
@@ -28,14 +29,17 @@ STAGES = {
     "prd": ("pilot-deploy", "pilot.ginbov.nl", "pilot-mcp.home"),
     "dev": ("pilot-dev-deploy", "pilot-dev.home", "pilot-dev-mcp.home"),
 }
-WORKLOAD = "pilot"
-# Container → the product its instance specializes. app:* of pilot are the `pilot-app` producer's.
-PRODUCTS = {
-    "migrate": "app:pilot",
-    "backend": "app:pilot",
-    "mcp": "app:pilot",
-    "ui": "app:pilot-ui",
+# Container → its workload and the product its instance specializes. app:* of pilot are the
+# `pilot-app` producer's.
+POD = {
+    "migrate": ("pilot", "app:pilot"),
+    "backend": ("pilot", "app:pilot"),
+    "mcp": ("pilot", "app:pilot"),
+    "ui": ("pilot", "app:pilot-ui"),
 }
+# The collector's container, which the chart renders only where the stage's values pin its image
+# (chart/templates/collector.yaml).
+COLLECTOR = {"collector": ("pilot-collector", "app:pilot-collector")}
 # The UI's service, the `pilot-app` producer's.
 UI_SERVICE = "svc:pilot-ui-web"
 # The providers both stages' values point the backend at: db.host's pooler and the Service behind
@@ -81,26 +85,35 @@ def relations(doc, kind, source=None, target=None):
     ]
 
 
-def instances(doc):
+def containers(stage):
+    """Container → (workload, product) of what the stage's values render: the pod's four, and the
+    collector's where its image is pinned."""
+    values = yaml.safe_load((REPO / "config" / stage / "values.yaml").read_text())
+    pinned = (values.get("images") or {}).get("collector")
+    return {**POD, **(COLLECTOR if pinned else {})}
+
+
+def instances(doc, expected):
     by_container = {}
     for element in elements(doc):
         stats = element.get("stats") or {}
         if "container" in stats:
+            workload = expected.get(stats["container"], (None, None))[0]
             check(
-                stats.get("workload") == WORKLOAD,
-                f"container {stats['container']} runs in workload {stats.get('workload')}, not {WORKLOAD}",
+                workload is None or stats.get("workload") == workload,
+                f"container {stats['container']} runs in workload {stats.get('workload')}, not {workload}",
             )
             by_container[stats["container"]] = element["id"]
     return by_container
 
 
-def check_products(doc, inst, producer, must_resolve):
+def check_products(doc, inst, producer, expected, must_resolve):
     check(doc.get("producer") == producer, f"the artifact's producer is {doc.get('producer')}, not {producer}")
     check(
-        set(inst) == set(PRODUCTS),
-        f"the artifact's instances are the containers {sorted(inst)}, not {sorted(PRODUCTS)}",
+        set(inst) == set(expected),
+        f"the artifact's instances are the containers {sorted(inst)}, not {sorted(expected)}",
     )
-    for container, product in PRODUCTS.items():
+    for container, (_, product) in expected.items():
         if container not in inst:
             continue
         targets = [r["target"] for r in relations(doc, "Specialization", source=inst[container])]
@@ -198,8 +211,9 @@ def main():
 
     producer, host, mcp_host = STAGES[args.stage]
     doc = load(producer)
-    inst = instances(doc)
-    check_products(doc, inst, producer, args.resolved)
+    expected = containers(args.stage)
+    inst = instances(doc, expected)
+    check_products(doc, inst, producer, expected, args.resolved)
     check_exposed_hosts(doc, host, mcp_host)
     check_public_host(doc, inst, host, args.resolved)
     check_mcp_host(doc, inst, mcp_host, args.resolved)

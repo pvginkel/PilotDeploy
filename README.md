@@ -9,10 +9,11 @@ database (`pilot_dev_db`) and secrets, on `kubecoder-dev`'s fleet, follows `main
 production at `https://pilot.ginbov.nl`, public, on the operator's KubeCoder, follows the `prd`
 branch. Every green PilotApp build pins `:dev-<n>` into `config/dev/` and `:prd-<n>` into
 `config/prd/` in one commit on `main`, so dev rolls to it and production waits for a promotion: the
-job `PilotApp/Promote-PRD` (`Jenkinsfile.promote`), started by hand, retags `pilot`, `pilot-ui` and
-`pilot-sync` from `dev-<n>` to `prd-<n>`, fast-forwards `prd` to a commit on `main`, its tip unless
-the run names another, moves `pilot-sync:prd-latest`, which production's store environment runs, to
-that build's sidecar, and tags that commit `release-<m>`. A rollback is a revert on `main`,
+job `PilotApp/Promote-PRD` (`Jenkinsfile.promote`), started by hand, retags `pilot`, `pilot-ui`,
+`pilot-collector` and `pilot-sync` from `dev-<n>` to `prd-<n>`, fast-forwards `prd` to a commit on
+`main`, its tip unless the run names another, moves `pilot-sync:prd-latest`, which production's
+store environment runs, to that build's sidecar, and tags that commit `release-<m>`. A commit whose
+`images.collector` is empty or absent has no collector retagged. A rollback is a revert on `main`,
 promoted. prd's Terraform state owns the repository's webhook (`manage_webhook`), dev's none.
 
 **The pod** runs the backend, Pilot's MCP server and the UI's nginx. The MCP server is the backend
@@ -40,6 +41,42 @@ surface alone, and an `mcp` started before its Secrets exist refuses every call 
 until its next start. `tests/render-chart.py` pins the four on both stages' `mcp` and on no other
 container, both Secrets' references optional, each stage's service-user leaf its own, and the
 shared leaf as no stage's.
+
+**The collector** is a second pod on each stage, the Deployment `pilot-collector`
+(`chart/templates/collector.yaml`), running the image `registry:5000/pilot-collector` under its own
+command: one process that walks the transcripts on the stage's fleet's home, publishes them to the
+backend, and serves a conversation's reading. It runs on the node that holds both fleets' homes,
+the one labelled `homelab.local/storage: zpool5`, whose taint `homelab.local/performance=high` it
+tolerates, one pod at a time: the Deployment's strategy is `Recreate`, so that a roll never runs
+two walks. `collector.home` in `config/<stage>/values.yaml` names the stage's fleet's home on that
+node, `/zpool5/kubecoder/system/home` for production and `/zpool5/kubecoder-dev/system/home` for
+dev, and the pod mounts two folders of it read-only, `.claude/projects` and `.claude/plugins`, at
+`/home/ubuntu/.claude/projects` and `/home/ubuntu/.claude/plugins`, where the plugins' install paths
+point; never `.claude` whole, no other volume, and no service account token. Each is a host
+path of type `Directory`, so a folder the node lacks keeps the pod from starting where the kubelet
+would otherwise make it. The collector's three settings are `COLLECTOR_HOME`,
+`/home/ubuntu/.claude`; `COLLECTOR_PILOT_URL`, `http://pilot`, the Service in front of the UI's
+nginx, which proxies `/api/` to the backend; and `COLLECTOR_TOKEN`, its bearer.
+
+**The collector's bearer** is generated in the cluster and placed by nobody: the Secret
+`pilot-collector-token`, key `password`, a third beside `pilot-secret-key` and `pilot-drain-auth`
+in `chart/templates/generated-secrets.yaml`. The collector and the backend both read it as
+`COLLECTOR_TOKEN`, and neither read is optional. The backend reaches the collector's readings
+through the Service `pilot-collector`, port 3503, which carries none of the front door's
+annotations: nothing outside the cluster reaches it. The collector's probes are TCP probes of that
+port, since every path there asks for the bearer. Its pod's label, `app.kubernetes.io/name:
+pilot-collector`, keeps it out of the Services `pilot` and `pilot-mcp`.
+
+**The collector's pin**, `images.collector`, decides whether a stage has a collector. While it is
+the empty string the chart renders neither the Deployment nor the Service and hands the backend no
+`COLLECTOR_TOKEN`, so the backend refuses every call of a collector's and its readiness reads the
+collector as disabled. The PilotApp build pins it with the two others, and production's pin takes
+effect with the promotion that retags the image. `tests/render-chart.py` renders each stage with
+the pin set and with it empty, whatever the stage's values hold, and pins all of the above: the
+node, the strategy, the two mounts off the stage's own fleet's home, the settings, the bearer on
+the collector and the backend alone, the probes, the Service, and no stage's values naming another
+stage's home. `tests/architecture-test.py` expects the collector's workload in a stage's artifact
+exactly where that stage's values pin it.
 
 **Each stage's store** is a KubeCoder environment on its fleet whose `pilot-sync` sidecar the
 backend admits: `store.environmentId` in `config/<stage>/values.yaml` sets `STORE_ENVIRONMENT_ID`,

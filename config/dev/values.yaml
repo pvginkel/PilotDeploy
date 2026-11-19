@@ -44,6 +44,12 @@ controller:
 store:
   environmentId: pvginkel-pilotprojects-d75970
 
+# The collector (chart/templates/collector.yaml): kubecoder-dev's fleet's home, a host path of the node
+# that holds it. The collector's pod mounts that home's `.claude/projects` and `.claude/plugins`
+# read-only, and nothing else of it.
+collector:
+  home: /zpool5/kubecoder-dev/system/home
+
 # The brain's sessions, the chat's and every job's alike: their model (BRAIN_MODEL) and reasoning
 # effort (BRAIN_REASONING_EFFORT), and the seconds after its last turn at which an open project
 # chat closes (CHAT_CLOSE_TIMEOUT), the prompt cache's 55 minutes.
@@ -119,9 +125,12 @@ externalSecrets:
           property: token
 
 images:
-  # The backend's and the UI's builds, registry:5000/pilot and registry:5000/pilot-ui. Every green
-  # PilotApp build pins both here as ":dev-<build number>", the tag it pushes, in one commit with
-  # config/prd's ":prd-<build number>" (cicd.writeVersionPins), editing these block-style lines in
-  # place; the pin step never creates a key.
+  # The backend's, the UI's and the collector's builds, registry:5000/pilot, registry:5000/pilot-ui
+  # and registry:5000/pilot-collector. Every green PilotApp build pins the three here as
+  # ":dev-<build number>", the tag it pushes, in one commit with config/prd's
+  # ":prd-<build number>" (cicd.writeVersionPins), editing these block-style lines in place; the
+  # pin step never creates a key. While `collector` is the empty string the chart renders no
+  # collector.
   pilot: ':dev-203'
   pilotUI: ':dev-203'
+  collector: ''

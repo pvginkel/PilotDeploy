@@ -33,7 +33,17 @@ reasoning effort and chat close timeout off the ones every stage runs, or handed
 migrations; on the gate's slot, across every project and in one, off the stage's values, or
 handed to the migrations; on the pod's shutdown timing off the three values it is sized to, or a
 container's preStop wait off the backend's; and on a stage's values or render naming another
-stage's host, MCP host, KubeCoder, store or own leaves.
+stage's host, MCP host, KubeCoder, store, fleet's home or own leaves.
+
+The collector is rendered twice more, whatever the stage's values pin: with its pin set and with
+it empty. With the pin, the gate fails on its Deployment off the storage node, off one pod
+replaced before the next starts, holding a service account token, running anything but the image's
+own command, or mounting anything but its stage's fleet's `projects` and `plugins`, read-only; on
+its settings off Service pilot and the folder the mounts are in, or any setting beside them; on
+its bearer off the generated secret, optional, other than the backend's, or handed to any other
+container; on its probes off its port; and on its Service off that port, fronted, or its pod's
+labels and the pilot pod's selected by each other's Deployment or Service. With the pin empty, it
+fails on a collector rendered or a container holding its bearer.
 
 Run `cexec aac-tools chart-deps` first; the render needs chart/charts/ populated.
 """
@@ -78,6 +88,9 @@ class Stage:
     kubecoder: str
     # The store environment on that controller's fleet whose pilot-sync sidecar the sync admits.
     store: str
+    # That fleet's home, a host path of the storage node, whose `.claude/projects` and
+    # `.claude/plugins` the collector's pod mounts.
+    home: str
     # Whether YouTrack posts its tracker events to the stage, and so its backend reads the
     # webhook token.
     tracker_events: bool
@@ -162,6 +175,7 @@ STAGES = (
         public=True,
         kubecoder="https://kubecoder.home",
         store="pvginkel-pilotprojects-8b0225",
+        home="/zpool5/kubecoder/system/home",
         tracker_events=True,
         parallelism={"WORK_PARALLELISM_MAX": "5", "PROJECT_PARALLELISM_MAX": "3"},
     ),
@@ -172,6 +186,7 @@ STAGES = (
         public=False,
         kubecoder="https://kubecoder-dev.home",
         store="pvginkel-pilotprojects-d75970",
+        home="/zpool5/kubecoder-dev/system/home",
         tracker_events=False,
     ),
 )
@@ -188,7 +203,10 @@ HOOK_NAMESPACE = "argocd-hooks"
 HOOK_GUARD = "is required by the Terraform PreSync hook"
 # The image slots of config/<stage>/values.yaml, which PilotApp's build writes
 # (cicd.writeVersionPins, its Jenkinsfile's "Write image pins").
-PINS = ("images.pilot", "images.pilotUI")
+PINS = ("images.pilot", "images.pilotUI", "images.collector")
+# The collector's pin, which alone may be the empty string: PilotDeploy carries its key before a
+# PilotApp build has pushed that image, and the chart renders no collector on it.
+COLLECTOR_PIN = "images.collector"
 # A key line as cicd.writeVersionPins matches it (JenkinsPipelineUtils vars/cicd.groovy, applyPins).
 KEY_LINE = re.compile(r" *([A-Za-z0-9_.\-]+): *(.*)")
 # The one cluster-scoped kind the chart renders, which the releases AppProject's
@@ -212,6 +230,35 @@ CONTAINER_IMAGES = {
     "backend": ("registry:5000/pilot", "pilot"),
     "mcp": ("registry:5000/pilot", "pilot"),
     "ui": ("registry:5000/pilot-ui", "pilotUI"),
+}
+# The collector (PilotApp collector/): its Deployment and its Service, one name, and its one
+# container's image and pin. The image sets its own user, entry point and command.
+COLLECTOR = "pilot-collector"
+COLLECTOR_CONTAINER = "collector"
+COLLECTOR_IMAGE = ("registry:5000/pilot-collector", "collector")
+# The port it serves a conversation's reading on (collector/src/pilot_collector/settings.py,
+# COLLECTOR_PORT's default, which the chart leaves unset). Every path there asks for the bearer,
+# so a probe is the port's.
+COLLECTOR_PORT = 3503
+# Its three settings with no default: Pilot's address, with no path, which is Service pilot, the
+# UI's nginx, on the port that Service serves; the folder that holds `projects`, where the plugins'
+# install paths have Claude Code's folder; and the bearer, which the backend reads under the same
+# name and the migrations never. Its others keep the image's defaults.
+COLLECTOR_ENV = {
+    "COLLECTOR_PILOT_URL": "http://pilot",
+    "COLLECTOR_HOME": "/home/ubuntu/.claude",
+}
+COLLECTOR_PILOT_PORT = 80
+COLLECTOR_TOKEN_ENV = "COLLECTOR_TOKEN"
+COLLECTOR_SECRET = "pilot-collector-token"
+# The two folders of a fleet's home it is handed, each at its place under COLLECTOR_HOME, and
+# never `.claude` whole.
+HOME_FOLDERS = ("projects", "plugins")
+# The node zpool5 is on, where each fleet's home is a host path, and that node's taint.
+STORAGE_NODE = {"homelab.local/storage": "zpool5"}
+STORAGE_TAINT = {
+    "key": "homelab.local/performance", "operator": "Equal", "value": "high",
+    "effect": "NoSchedule",
 }
 # The SSE gateway's image, retired: the backend serves the browser's stream itself
 # (GET /api/sse/stream, backend/app/api/sse.py), behind the UI's nginx `location /api/`.
@@ -329,7 +376,7 @@ LINK_VALUES = "links"
 TICKET_URL_TEMPLATE = "https://issues.webathome.org/issue/{id}"
 LINK_VARS = ("TICKET_URL_TEMPLATE", "ENVIRONMENT_LINK_BASE_URL")
 # The secrets ESO generates in the cluster, once each; a Password generator yields key `password`.
-GENERATED = {"pilot-secret-key", "pilot-drain-auth"}
+GENERATED = {"pilot-secret-key", "pilot-drain-auth", COLLECTOR_SECRET}
 GENERATOR_KEY = "password"
 # An env var or query parameter named like this carries a secret, so never a literal.
 SECRET_NAME = re.compile(r"secret|password|token|(^|_)key$", re.IGNORECASE)
@@ -497,9 +544,10 @@ def check_pin_slots(stage):
         )
         value = images.get(pin.removeprefix("images."))
         check(
-            isinstance(value, str) and stage.tag_pin.fullmatch(value) is not None,
+            (pin == COLLECTOR_PIN and value == "")
+            or (isinstance(value, str) and stage.tag_pin.fullmatch(value) is not None),
             f"{stage.values} pins {pin} to {value!r}, not a tag suffix ':{stage.name}-<build>' "
-            "or ':<build>'",
+            f"or ':<build>'{', or the empty string' if pin == COLLECTOR_PIN else ''}",
         )
     stale = sorted(f"images.{name}" for name in images if f"images.{name}" not in PINS)
     check(not stale, f"{stage.values} pins {stale}, beyond the pod's slots {list(PINS)}")
@@ -685,11 +733,20 @@ def backend_env(stage):
     }
 
 
+def collector_pinned(stage):
+    """Whether the stage's values pin the collector's image, and so render it."""
+    return bool((yaml.safe_load(values_text(stage)).get("images") or {}).get("collector"))
+
+
 def check_pod(docs, stage):
-    deployments = [doc for doc in docs if doc["kind"] == "Deployment"]
+    deployments = sorted(label(doc) for doc in docs if doc["kind"] == "Deployment")
+    expected = [f"Deployment/{DEPLOYMENT}"]
+    if collector_pinned(stage):
+        expected.append(f"Deployment/{COLLECTOR}")
     check(
-        [label(doc) for doc in deployments] == [f"Deployment/{DEPLOYMENT}"],
-        f"renders {[label(doc) for doc in deployments]}, not the one Deployment/{DEPLOYMENT}",
+        deployments == expected,
+        f"renders {deployments}, not {expected}: the pod, and the collector where "
+        f"{stage.values} pins it",
     )
     deployment = find(docs, "Deployment", DEPLOYMENT)
     if deployment is None:
@@ -1044,22 +1101,30 @@ def check_no_gateway(docs):
 
 
 def check_images(stage):
-    """Each container runs its own pin's image. The two app pins hold one build number, so the
-    stage's render cannot tell them apart; this one sets each pin to a tag of its own."""
-    names = sorted({pin for _, pin in CONTAINER_IMAGES.values()})
+    """Each container runs its own pin's image. The pins hold one build number, so the stage's
+    render cannot tell them apart; this one sets each pin to a tag of its own."""
+    names = sorted({pin for _, pin in CONTAINER_IMAGES.values()} | {COLLECTOR_IMAGE[1]})
     pins = {pin: f":{9001 + i}" for i, pin in enumerate(names)}
     result = template(
         stage, {**hook_parameters(stage), **{f"images.{pin}": tag for pin, tag in pins.items()}}
     )
     if result.returncode != 0:
         sys.exit(f"helm template with distinct pins failed:\n{result.stderr}")
-    deployment = find(objects(result.stdout), "Deployment", DEPLOYMENT) or {}
+    docs = objects(result.stdout)
+    deployment = find(docs, "Deployment", DEPLOYMENT) or {}
     for name, (repository, pin) in CONTAINER_IMAGES.items():
         image = named(deployment, name).get("image") if deployment else None
         check(
             image == f"{repository}{pins[pin]}",
             f"container {name} runs {image}, not images.{pin}'s {repository}{pins[pin]}",
         )
+    repository, pin = COLLECTOR_IMAGE
+    collector = find(docs, "Deployment", COLLECTOR)
+    image = named(collector, COLLECTOR_CONTAINER).get("image") if collector else None
+    check(
+        image == f"{repository}{pins[pin]}",
+        f"the collector runs {image}, not images.{pin}'s {repository}{pins[pin]}",
+    )
 
 
 def check_links_unset(stage):
@@ -1301,6 +1366,220 @@ def check_mcp_service(docs, deployment, stage):
     )
 
 
+def collector_render(stage, pin):
+    """The stage's render with the collector's pin set to `pin`, whatever its values pin."""
+    result = template(stage, {**hook_parameters(stage), COLLECTOR_PIN: pin})
+    if result.returncode != 0:
+        sys.exit(f"helm template with {COLLECTOR_PIN}={pin!r} failed:\n{result.stderr}")
+    return result.stdout
+
+
+def pod_labels(deployment):
+    return deployment["spec"]["template"]["metadata"].get("labels") or {}
+
+
+def selects(selector, labels):
+    return bool(selector) and selector.items() <= labels.items()
+
+
+def check_collector_pod(deployment, stage):
+    """One collector at a time on the storage node, with no credential of the cluster's, running
+    the image's own command with its three settings alone, and handed the two folders of its
+    stage's fleet's home, read-only, and nothing else."""
+    spec = deployment["spec"]
+    check(
+        spec.get("replicas") == 1 and spec.get("strategy") == {"type": "Recreate"},
+        f"Deployment/{COLLECTOR} runs {spec.get('replicas')} replicas under "
+        f"{spec.get('strategy')}, not one pod replaced by Recreate: a roll would run two walks "
+        "at a time",
+    )
+    pod = spec["template"]["spec"]
+    check(
+        pod.get("nodeSelector") == STORAGE_NODE and pod.get("tolerations") == [STORAGE_TAINT],
+        f"the collector's pod selects {pod.get('nodeSelector')} and tolerates "
+        f"{pod.get('tolerations')}, not {STORAGE_NODE} with {[STORAGE_TAINT]}, the node that "
+        "holds the fleet's home",
+    )
+    check(
+        pod.get("automountServiceAccountToken") is False,
+        "the collector's pod mounts a service account token, a credential beside its bearer",
+    )
+    names = {
+        "initContainers": [c["name"] for c in pod.get("initContainers") or []],
+        "containers": [c["name"] for c in pod["containers"]],
+    }
+    check(
+        names == {"initContainers": [], "containers": [COLLECTOR_CONTAINER]},
+        f"the collector's pod runs {names}, not the one container {COLLECTOR_CONTAINER}",
+    )
+    collector = named(deployment, COLLECTOR_CONTAINER)
+    check(
+        "command" not in collector and "args" not in collector,
+        f"the collector runs command {collector.get('command')} args {collector.get('args')}, "
+        "not the image's own",
+    )
+
+    volumes = {volume["name"]: volume for volume in pod.get("volumes") or []}
+    mounted = {
+        mount["mountPath"]: (
+            (volumes.get(mount["name"]) or {}).get("hostPath"),
+            mount.get("readOnly"),
+            mount.get("subPath"),
+        )
+        for mount in collector.get("volumeMounts") or []
+    }
+    home = COLLECTOR_ENV["COLLECTOR_HOME"]
+    expected = {
+        f"{home}/{folder}": (
+            {"path": f"{stage.home}/.claude/{folder}", "type": "Directory"}, True, None,
+        )
+        for folder in HOME_FOLDERS
+    }
+    check(
+        mounted == expected
+        and len(volumes) == len(expected)
+        and all(set(volume) == {"name", "hostPath"} for volume in volumes.values()),
+        f"the collector mounts {mounted} of the volumes {sorted(volumes)}, not {expected} "
+        "alone: its stage's fleet's two folders, read-only, each failing the pod's start where "
+        "the node lacks it",
+    )
+
+    env = {
+        name: entry.get("value") if set(entry) == {"name", "value"} else entry
+        for name, (_, entry) in env_of(collector).items() if secret_ref(entry) is None
+    }
+    secrets = sorted(name for name, (_, entry) in env_of(collector).items() if secret_ref(entry))
+    check(
+        env == COLLECTOR_ENV and secrets == [COLLECTOR_TOKEN_ENV] and not collector.get("envFrom"),
+        f"the collector's env is {env}, with {secrets} read from Secrets"
+        f"{' and an envFrom' if collector.get('envFrom') else ''}, not {COLLECTOR_ENV} with "
+        f"{[COLLECTOR_TOKEN_ENV]} read from a Secret, alone",
+    )
+    for probe in ("readinessProbe", "livenessProbe"):
+        probed = collector.get(probe) or {}
+        port = (probed.get("tcpSocket") or {}).get("port")
+        check(
+            port is not None
+            and container_port(collector, port) == COLLECTOR_PORT
+            and not {"httpGet", "exec", "grpc"} & set(probed),
+            f"the collector's {probe} is {probed}, not a TCP probe of its port {COLLECTOR_PORT}: "
+            "every path there asks for the bearer",
+        )
+
+
+def check_collector_bearer(pilot, deployment):
+    """The collector and the backend read the one generated bearer, which each needs to start
+    with, and no other container is handed it."""
+    ref = {"name": COLLECTOR_SECRET, "key": GENERATOR_KEY}
+    readers = (
+        ("the collector's", named(deployment, COLLECTOR_CONTAINER)),
+        ("the backend's", named(pilot, "backend")),
+    )
+    for whose, container in readers:
+        read = secret_ref(env_of(container).get(COLLECTOR_TOKEN_ENV, (None, {}))[1])
+        check(
+            read == ref,
+            f"{whose} {COLLECTOR_TOKEN_ENV} reads {read}, not {ref}, the bearer generated in "
+            "the cluster, without which neither side admits the other",
+        )
+    others = sorted(
+        container["name"] for container in pod_containers(pilot)
+        if container["name"] != "backend" and COLLECTOR_TOKEN_ENV in env_of(container)
+    )
+    check(
+        not others,
+        f"containers {others} set {COLLECTOR_TOKEN_ENV}, which the backend and the collector "
+        "alone read",
+    )
+
+
+def check_collector_wiring(docs, pilot, deployment):
+    """The collector's Service routes its port to the collector's pod alone, behind no front
+    door; the pilot pod's Services and Deployment select none of it; and its address of Pilot is
+    a port Service pilot serves."""
+    labels = pod_labels(deployment)
+    pilot_labels = pod_labels(pilot)
+    for doc in docs:
+        if doc["kind"] == "Deployment":
+            selector = doc["spec"]["selector"].get("matchLabels") or {}
+        elif doc["kind"] == "Service":
+            selector = doc["spec"].get("selector") or {}
+        else:
+            continue
+        own, other = (
+            (labels, pilot_labels) if doc["metadata"]["name"] == COLLECTOR
+            else (pilot_labels, labels)
+        )
+        check(
+            selects(selector, own) and not selects(selector, other),
+            f"{label(doc)} selects {selector}, which does not tell the collector's pod "
+            f"{labels} from the pilot pod {pilot_labels}",
+        )
+    service = find(docs, "Service", COLLECTOR)
+    fronted = sorted(
+        key for key in service["metadata"].get("annotations") or {} if key.startswith(FRONT_DOOR)
+    )
+    check(
+        not fronted and service["spec"].get("type") == "ClusterIP",
+        f"Service/{COLLECTOR} is a {service['spec'].get('type')} carrying {fronted}: the "
+        "backend alone reaches the collector, inside the cluster",
+    )
+    ports = [(port.get("port"), port.get("targetPort")) for port in service["spec"]["ports"]]
+    check(
+        len(ports) == 1
+        and ports[0][0] == COLLECTOR_PORT
+        and container_port(named(deployment, COLLECTOR_CONTAINER), ports[0][1]) == COLLECTOR_PORT,
+        f"Service/{COLLECTOR} routes {ports}, not port {COLLECTOR_PORT} to the collector's "
+        f"{COLLECTOR_PORT}",
+    )
+    site = find(docs, "Service", "pilot") or {"spec": {"ports": []}}
+    check(
+        COLLECTOR_PILOT_PORT in [port.get("port") for port in site["spec"]["ports"]],
+        f"Service/pilot serves no port {COLLECTOR_PILOT_PORT}, where the collector's "
+        f"COLLECTOR_PILOT_URL {COLLECTOR_ENV['COLLECTOR_PILOT_URL']} calls it",
+    )
+
+
+def check_collector_absent(stage):
+    """With the pin empty the stage renders no collector, and no container holds its bearer: a
+    backend holding it reads the missing collector as behind."""
+    docs = objects(collector_render(stage, ""))
+    rendered = sorted(label(doc) for doc in docs if doc["metadata"].get("name") == COLLECTOR)
+    check(not rendered, f"with {COLLECTOR_PIN} empty, renders {rendered}")
+    holders = sorted(
+        f"{label(doc)}'s {container['name']}"
+        for doc in docs if doc["kind"] == "Deployment"
+        for container in pod_containers(doc)
+        if COLLECTOR_TOKEN_ENV in env_of(container)
+    )
+    check(not holders, f"with {COLLECTOR_PIN} empty, {holders} set {COLLECTOR_TOKEN_ENV}")
+
+
+def check_collector(stage):
+    """The collector as the stage renders it with its pin set, and its absence with the pin
+    empty. Returns the render with the pin."""
+    text = collector_render(stage, f":{stage.name}-9000")
+    docs = objects(text)
+    check_scope(docs, stage)
+    check_no_literal_secrets(docs, text)
+    pilot = find(docs, "Deployment", DEPLOYMENT)
+    deployment = find(docs, "Deployment", COLLECTOR)
+    service = find(docs, "Service", COLLECTOR)
+    check(
+        deployment is not None and service is not None,
+        f"with {COLLECTOR_PIN} set, no Deployment/{COLLECTOR} with its Service/{COLLECTOR}",
+    )
+    if pilot is not None and deployment is not None and service is not None:
+        check_collector_pod(deployment, stage)
+        check_collector_bearer(pilot, deployment)
+        check_collector_wiring(docs, pilot, deployment)
+        for pod in (pilot, deployment):
+            check_env(pod)
+            check_secret_refs(docs, pod, stage)
+    check_collector_absent(stage)
+    return text
+
+
 def check_render_stable(stage, first):
     # `now` renders to the second, so a render more than a second later differs if any value
     # reads the clock; one reading randomness differs on any second render.
@@ -1309,25 +1588,28 @@ def check_render_stable(stage, first):
 
 
 def stage_markers(stage):
-    """What names the stage alone: its host, its MCP host, its KubeCoder, its store, and its own
-    leaves, which the projects surface's token's, read by both stages, is not."""
+    """What names the stage alone: its host, its MCP host, its KubeCoder, its store, its fleet's
+    home, and its own leaves, which the projects surface's token's, read by both stages, is
+    not."""
     leaves = {leaf for _, leaf, _ in [*stage.leaves.values(), *stage.mcp_leaves.values()]}
     return {
         stage.host,
         stage.mcp_host,
         stage.kubecoder,
         stage.store,
+        stage.home,
         *(leaves - {PROJECTS_TOKEN_LEAF}),
     }
 
 
 def check_isolation(renders):
-    """No stage's values or render name another stage's host, MCP host, KubeCoder, store or own
-    leaves: dev's sessions are never the operator's own fleet's nor handed production's MCP server,
-    dev's sync never admits production's store, and production never reads dev's client, service
-    user or bearer."""
+    """No stage's values or render name another stage's host, MCP host, KubeCoder, store, fleet's
+    home or own leaves: dev's sessions are never the operator's own fleet's nor handed production's
+    MCP server, dev's sync never admits production's store, dev's collector never reads the
+    operator's own fleet's transcripts, and production never reads dev's client, service user or
+    bearer."""
     for stage in STAGES:
-        texts = {stage.values: values_text(stage), "its render": renders[stage.name]}
+        texts = {stage.values: values_text(stage), **renders[stage.name]}
         for other in STAGES:
             if other is stage:
                 continue
@@ -1364,8 +1646,9 @@ def check_stage(stage):
         check_web_push(docs, deployment, stage)
         check_projects(docs, deployment, stage)
         check_parallelism(deployment, stage)
+    with_collector = check_collector(stage)
     check_render_stable(stage, first)
-    return first, len(docs)
+    return {"its render": first, "its render with the collector": with_collector}, len(docs)
 
 
 def main():
