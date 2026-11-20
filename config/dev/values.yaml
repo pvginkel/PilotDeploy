@@ -131,6 +131,6 @@ images:
   # ":prd-<build number>" (cicd.writeVersionPins), editing these block-style lines in place; the
   # pin step never creates a key. While `collector` is the empty string the chart renders no
   # collector.
-  pilot: ':dev-204'
-  pilotUI: ':dev-204'
-  collector: ':dev-204'
+  pilot: ':dev-205'
+  pilotUI: ':dev-205'
+  collector: ':dev-205'
