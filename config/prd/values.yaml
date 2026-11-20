@@ -144,6 +144,6 @@ images:
   # a key. The prd-<n> tags are the promotion's retag of dev-<n>, and pilot-prd runs a pin once
   # the promotion has moved the prd branch it follows to a commit carrying it. While `collector`
   # is the empty string the chart renders no collector, and the promotion retags none.
-  pilot: ':prd-205'
-  pilotUI: ':prd-205'
-  collector: ':prd-205'
+  pilot: ':prd-206'
+  pilotUI: ':prd-206'
+  collector: ':prd-206'
